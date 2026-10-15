@@ -1,0 +1,4 @@
+# gitleaks' built-in rules (API keys, tokens, private keys, ...). The pre-commit
+# hook in hooks/ runs it against every staged change.
+[extend]
+useDefault = true

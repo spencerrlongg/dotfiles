@@ -1,0 +1,24 @@
+# Deny by default: nothing at the top level is tracked unless it's un-ignored
+# here. Add a line for each Stow package as it moves in (e.g. `!/nvim/`), so a
+# stray file or a whole folder Stow absorbed can't slip into a commit.
+/*
+!/.gitignore
+!/.gitleaks.toml
+!/README.md
+!/hooks/
+
+# Never tracked, even inside an un-ignored package. These come last so no
+# package line above can re-include them (the last matching rule wins).
+**/.credentials.json
+**/.claude.json
+**/auth.json
+**/hosts.yml
+**/ngrok.yml
+**/.ssh/
+**/atuin/key
+**/raycast/
+**/node_modules/
+**/__pycache__/
+**/*.sqlite*
+**/history.jsonl
+.DS_Store
