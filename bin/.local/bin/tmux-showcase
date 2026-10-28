@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# tmux-showcase: build the "showcase" session, a window of animations to look at.
+# Safe to run more than once; it does nothing if the session already exists.
+# Switch to it with prefix + V.
+#
+#   ┌──────────────┬─────────┐
+#   │   cbonsai    │tty-clock│
+#   │              ├─────────┤
+#   │              │  wave   │
+#   ├──────────────┴─────────┤
+#   │         btop           │
+#   └────────────────────────┘
+#
+# `tmux-showcase --style` reapplies the pane borders and their title tabs.
+# `tmux-showcase --layout` resizes the panes to fit the window. A window-resized
+# hook runs it, so the layout holds when a smaller client (the iPad) attaches.
+
+# Smallest panes that still draw: btop refuses to draw under 24 rows, and
+# tty-clock with seconds is 54 columns by 8 rows (digits plus the date line)
+BTOP_MIN_HEIGHT=24
+CLOCK_MIN_WIDTH=56
+CLOCK_MIN_HEIGHT=9
+
+apply_layout() {
+  local stats clock window_width window_height
+  stats=$(tmux show -t showcase -v @showcase_stats)
+  clock=$(tmux show -t showcase -v @showcase_clock)
+  read -r window_width window_height < <(tmux display -p -t "$stats" '#{window_width} #{window_height}')
+
+  local stats_height=$(( window_height * 43 / 100 ))
+  (( stats_height < BTOP_MIN_HEIGHT )) && stats_height=$BTOP_MIN_HEIGHT
+  local top_height=$(( window_height - stats_height - 1 ))
+
+  local clock_width=$(( window_width * 36 / 100 ))
+  (( clock_width < CLOCK_MIN_WIDTH )) && clock_width=$CLOCK_MIN_WIDTH
+  local clock_height=$(( top_height * 35 / 100 ))
+  (( clock_height < CLOCK_MIN_HEIGHT )) && clock_height=$CLOCK_MIN_HEIGHT
+
+  tmux resize-pane -t "$stats" -y "$stats_height"
+  tmux resize-pane -t "$clock" -x "$clock_width" -y "$clock_height"
+}
+
+# Kanagawa Dragon: border lines, the active pane's lines, kanji, label text
+LINE='#625e5a'
+ACTIVE='#8ba4b0'
+KANJI='#c4746e'
+TEXT='#c5c9c5'
+TEXT_DIM='#a6a69c'
+
+# Each pane gets a title tab on its top border, e.g. ──┤ 盆栽 bonsai ├────
+# The active pane's lines and label are brighter.
+apply_style() {
+  local w=showcase:garden
+  local line="#{?pane_active,#[fg=$ACTIVE],#[fg=$LINE]}"
+  local text="#{?pane_active,#[fg=$TEXT]#[bold],#[fg=$TEXT_DIM]}"
+  tmux set -w -t "$w" pane-border-lines single
+  tmux set -w -t "$w" pane-border-status top
+  tmux set -w -t "$w" pane-border-style "fg=$LINE"
+  tmux set -w -t "$w" pane-active-border-style "fg=$ACTIVE"
+  tmux set -w -t "$w" pane-border-format \
+    "${line}──┤ #[fg=$KANJI]#{@showcase_kanji} ${text}#{@showcase_label}#[nobold] ${line}├"
+
+  # Labels live in pane options, so programs that set the pane title can't change them
+  label() { tmux set -p -t "$1" @showcase_kanji "$2"; tmux set -p -t "$1" @showcase_label "$3"; }
+  label "$(tmux show -t showcase -v @showcase_tree)"  '盆栽' bonsai
+  label "$(tmux show -t showcase -v @showcase_clock)" '時計' clock
+  label "$(tmux show -t showcase -v @showcase_wave)"  '浪裏' wave
+  label "$(tmux show -t showcase -v @showcase_stats)" '監視' btop
+}
+
+if [[ $1 == --layout ]]; then
+  apply_layout
+  exit 0
+fi
+
+if [[ $1 == --style ]]; then
+  apply_style
+  exit 0
+fi
+
+tmux has-session -t showcase 2>/dev/null && exit 0
+
+# Detached sessions start at 80x24; give it a real size so the splits come out
+# proportioned, and tmux resizes it to the client on switch (window-size latest)
+tree=$(tmux new-session -d -s showcase -n garden -x 220 -y 60 -c "$HOME" -P -F '#{pane_id}')
+stats=$(tmux split-window -v -t "$tree" -l 43% -c "$HOME" -P -F '#{pane_id}')
+clock=$(tmux split-window -h -t "$tree" -l 36% -c "$HOME" -P -F '#{pane_id}')
+wave=$(tmux split-window -v -t "$clock" -l 65% -c "$HOME" -P -F '#{pane_id}')
+
+tmux set -t showcase @showcase_tree "$tree"
+tmux set -t showcase @showcase_stats "$stats"
+tmux set -t showcase @showcase_clock "$clock"
+tmux set -t showcase @showcase_wave "$wave"
+apply_style
+tmux set-hook -w -t showcase:garden window-resized 'run-shell -b "~/.local/bin/tmux-showcase --layout"'
+
+# Started with send-keys (like tmux-start) so quitting one leaves a shell behind
+tmux send-keys -t "$tree"  'clear && cbonsai -l -i -w 6 -M 4' Enter
+tmux send-keys -t "$stats" 'clear && btop' Enter
+tmux send-keys -t "$clock" 'clear && tty-clock -c -s -b -C 4 -n' Enter
+tmux send-keys -t "$wave"  'clear && kanagawa-wave --fps 12' Enter
+tmux select-pane -t "$tree"

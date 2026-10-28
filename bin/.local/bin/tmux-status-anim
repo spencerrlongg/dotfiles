@@ -1,0 +1,520 @@
+#!/usr/bin/env python3
+"""tmux-status-anim: one frame of the animation at the right of the tmux status bar.
+
+Each frame is worked out from the clock, so nothing is kept between frames
+except the chosen scene. Left to right:
+
+  agents   a spinner per Claude Code / Codex agent that is mid-turn, named by
+           session (tmux-agent-notify sets @agent_busy on prompt, clears it on stop)
+  eq       an equalizer while the Mac is playing audio, in place of the scene:
+           the real spectrum from cava where macOS allows audio capture, else
+           smooth made-up motion. With cava, the scene stays while it hears
+           nothing: apps like Safari hold the speakers open with nothing playing
+  scene    otherwise koi, petals, moon or bonsai, ten cells wide
+
+  tmux-status-anim --stream print a frame every second, forever (what tmux runs:
+                            a #() command that keeps running shows its latest line,
+                            which saves starting Python every second). The
+                            equalizer goes into the @status_eq option instead,
+                            about EQ_FPS times a second: tmux only redraws for
+                            this command's output on its 1 s status-interval, but
+                            setting an option redraws every client right away.
+  tmux-status-anim          print one frame
+  tmux-status-anim next     switch to the next scene (prefix + a)
+"""
+
+import ctypes
+import fcntl
+import os
+import random
+import re
+import signal
+import subprocess
+import sys
+import time
+from math import pi, sin
+
+SCENES = ["koi", "petals", "moon", "bonsai"]
+STATE = os.path.expanduser("~/.local/state/tmux-status-anim")
+WIDTH = 10
+ENV = dict(os.environ, PATH=f"/opt/homebrew/bin:{os.environ.get('PATH', '')}")
+
+# Kanagawa
+DEEP, WAVE, SPRAY, FOAM = "#2d4f67", "#658594", "#7fb4ca", "#c5c9c5"
+CARP, ORANGE, GOLD = "#c4746e", "#ffa066", "#c4b28a"
+SAKURA, VIOLET, DIM = "#d27e99", "#a292a3", "#625e5a"
+SPINNER_BLUE = "#7e9cd8"
+
+AUDIO_POLL = 3   # seconds between checks for audio playing
+EQ_FPS = 8       # equalizer frames a second; each one is a `tmux set` (~5 ms CPU)
+EQ_OPTION = "@status_eq"
+# tmux runs a --stream job per attached client, but EQ_OPTION is global; only the
+# job holding this lock runs cava and sets it
+EQ_LOCK = os.path.expanduser("~/.local/state/tmux-status-anim-eq.lock")
+# cava's raw output: one line per frame of WIDTH bar levels 0-7, matching BARS
+CAVA_CONF = os.path.expanduser("~/.local/state/tmux-status-anim-cava.conf")
+CAVA_CONFIG = f"""\
+; Written by tmux-status-anim for the status-bar equalizer; changes are overwritten.
+[general]
+framerate = 20
+bars = {WIDTH}
+[input]
+method = coreaudio
+source = tap
+[output]
+method = raw
+raw_target = /dev/stdout
+data_format = ascii
+ascii_max_range = 7
+bar_delimiter = 59
+frame_delimiter = 10
+channels = mono
+[smoothing]
+noise_reduction = 77
+"""
+QUIET_AFTER = 3.0  # seconds of all-zero cava frames before the scene comes back
+# Whether the equalizer is showing ("1") or cava hears silence ("0"), written by
+# the job holding EQ_LOCK so the other clients' jobs show the scene when it does
+EQ_SHOWN = os.path.expanduser("~/.local/state/tmux-status-anim-eq-shown")
+IDLE_POLL = 2.0  # seconds between checks while every client is in the screensaver
+
+SPINNER = [chr(c) for c in range(0xF0A9E, 0xF0AA6)]  # circle slices, 1/8 to full
+MOONS = [chr(c) for c in range(0xE38D, 0xE3A9)]      # 28 phases, new to waning crescent
+FLOWER = chr(0xF024A)
+TREE, BARE_TREE, LEAF = chr(0xF0531), chr(0xF0E69), chr(0xF032A)
+GREEN, PINE, SNOW = "#87a987", "#6a9589", "#c5c9c5"
+BARS = "▁▂▃▄▅▆▇█"
+EQ_COLORS = ["#658594", "#8ba4b0", "#8ea4a2", "#87a987", "#c4b28a", "#b6927b", "#c4746e", "#c4746e"]
+
+
+def rnd(*seed):
+    """A repeatable random number in [0, 1) for these integers."""
+    return random.Random(hash(seed)).random()
+
+
+def cell(color, text):
+    return f"#[fg={color}]{text}"
+
+
+def read_scene():
+    try:
+        name = open(STATE).read().strip()
+    except OSError:
+        name = ""
+    return name if name in SCENES else SCENES[0]
+
+
+def koi(t):
+    """A fish wandering the pond: every 16s it picks a spot and swims there at a
+    cell per second, then idles, blowing the odd bubble. Ripples drift past."""
+    swim = WIDTH - 3
+    spot = lambda seg: int(rnd(1, seg) * (swim + 1))
+    seg, into = divmod(t, 16)
+    start, end = spot(seg), spot(seg + 1)
+    x = start + min(into, abs(end - start)) * (1 if end >= start else -1)
+    # Face the way it's swimming; when it stays put, the way it last swam
+    right = end > start if end != start else start >= spot(seg - 1)
+    cells = [cell(DEEP, "∼") if rnd(2, i + t // 3) < 0.12 else " " for i in range(WIDTH)]
+    fish = [(CARP, ">"), (ORANGE, "<"), (ORANGE, ">")] if right else [(ORANGE, "<"), (ORANGE, ">"), (CARP, "<")]
+    for i, (color, ch) in enumerate(fish):
+        cells[x + i] = cell(color, ch)
+    mouth = x + 3 if right else x - 1
+    if 0 <= mouth < WIDTH and rnd(3, t) < 0.3:
+        cells[mouth] = cell(SPRAY, "°" if rnd(4, t) < 0.5 else "∘")
+    return "".join(cells)
+
+
+def petals(t):
+    """Cherry blossoms blowing right to left, one cell per second."""
+    out = []
+    for i in range(WIDTH):
+        n = i + t  # the same petal keeps its look as it drifts left
+        if rnd(5, n) >= 0.2:
+            out.append(" ")
+            continue
+        kind = rnd(6, n)
+        if kind < 0.15:
+            out.append(cell(SAKURA, FLOWER))
+        elif kind < 0.45:
+            out.append(cell(SAKURA, "∘"))
+        elif kind < 0.7:
+            out.append(cell(VIOLET, "˚"))
+        else:
+            out.append(cell(SAKURA if rnd(7, n) < 0.5 else VIOLET, "·"))
+    return "".join(out)
+
+
+def moon(t):
+    """Tonight's actual moon phase, with stars twinkling beside it."""
+    synodic = 29.530588853
+    age = ((time.time() - 947182440) / 86400) % synodic  # since the new moon of 2000-01-06 18:14 UTC
+    phase = MOONS[round(age / synodic * 28) % 28]
+    day = int(time.time() // 86400)
+    stars = []
+    for i in range(WIDTH - 2):
+        if rnd(8, i, day) >= 0.35:  # star positions change once a day
+            stars.append(" ")
+            continue
+        twinkle = rnd(9, i, t)
+        if twinkle < 0.08:
+            stars.append(cell(GOLD, "✶"))
+        elif twinkle < 0.35:
+            stars.append(cell(FOAM, "⋅"))
+        elif twinkle < 0.75:
+            stars.append(cell(DIM, "·"))
+        else:
+            stars.append(" ")
+    return "".join(stars) + " " + cell(GOLD, phase)
+
+
+def bonsai(t):
+    """A bonsai dressed for the real season, shedding leaves (or blossoms, or
+    letting snow fall) that drift left away from it and fade before they land."""
+    month = time.localtime().tm_mon
+    if month in (3, 4, 5):
+        tree, tree_color, rate, bits = TREE, GREEN, 0.25, [(SAKURA, "∘"), (SAKURA, "·"), (VIOLET, "˚")]
+    elif month in (6, 7, 8):
+        tree, tree_color, rate, bits = TREE, PINE, 0.08, [(GREEN, LEAF), (PINE, "·")]
+    elif month in (9, 10, 11):
+        tree_color = CARP if rnd(11, t // 30) < 0.5 else ORANGE  # turns between reds
+        tree, rate, bits = TREE, 0.35, [(CARP, LEAF), (ORANGE, LEAF), (GOLD, "·"), (CARP, "·")]
+    else:
+        tree, tree_color, rate, bits = BARE_TREE, SNOW, 0.3, [(SNOW, "·"), (FOAM, "˚"), (DIM, "·")]
+    cells = []
+    for i in range(WIDTH - 1):
+        age = WIDTH - 2 - i   # seconds since a bit at this cell left the tree
+        born = t - age
+        shed = lambda second: rnd(12, second) < rate
+        # Never two in a row, so they drift apart instead of in a chain
+        if not shed(born) or shed(born - 1) or age > 3 + int(rnd(13, born) * 6):
+            cells.append(" ")
+            continue
+        color, glyph = bits[int(rnd(14, born) * len(bits))]
+        cells.append(cell(DIM if age > 6 else color, glyph))
+    return "".join(cells) + cell(tree_color, tree)
+
+
+def eq_cells(levels):
+    return "".join(cell(EQ_COLORS[level], BARS[level]) for level in levels)
+
+
+def made_up_levels(t):
+    """A stand-in spectrum for when cava can't run: each bar rides two sine waves
+    with its own speeds and phases, so it glides at any frame rate instead of
+    jumping. `t` is in (fractional) seconds."""
+    levels = []
+    for i in range(WIDTH):
+        slow, fast = 1.3 + 1.7 * rnd(20, i), 3.1 + 2.9 * rnd(21, i)
+        h = 0.5 + 0.28 * sin(slow * t + 2 * pi * rnd(22, i)) + 0.17 * sin(fast * t + 2 * pi * rnd(23, i))
+        h *= 1.15 - i / WIDTH * 0.4  # bass side a little taller
+        levels.append(max(0, min(len(BARS) - 1, int(h * len(BARS)))))
+    return levels
+
+
+def audio_capture_allowed():
+    """Whether cava may capture system audio from here, checked without asking.
+    macOS decides by the responsible process: Ghostty when the tmux server was
+    started in it (granted), the mosh-server chain when it was started from the
+    iPad (never granted). Denied, cava runs `open` on the Privacy pane and System
+    Settings pops up on the Mac. Same check as tmux-screensaver."""
+    try:
+        tcc = ctypes.CDLL("/System/Library/PrivateFrameworks/TCC.framework/TCC")
+        cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+        cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+        tcc.TCCAccessPreflight.restype = ctypes.c_int
+        tcc.TCCAccessPreflight.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        service = cf.CFStringCreateWithCString(None, b"kTCCServiceAudioCapture", 0x08000100)
+        return tcc.TCCAccessPreflight(service, None) == 0  # 0 granted, 1 denied, 2 never asked
+    except (OSError, AttributeError):
+        return False
+
+
+def set_eq_option(text):
+    try:
+        subprocess.run(["tmux", "set", "-g", EQ_OPTION, text], timeout=2, env=ENV,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+class LiveEqualizer:
+    """The equalizer while audio plays. Levels come from a cava running in raw
+    mode for as long as the audio does (it's only started then, so audio isn't
+    captured the rest of the time), or from made_up_levels when cava isn't
+    allowed or has exited. Each frame that differs from the last is pushed to
+    EQ_OPTION, which status-right shows after this script's own output.
+
+    The audio check only says some app holds the speakers open, and Safari does
+    that for as long as a tab has media in it, playing or not. So with cava
+    running, the equalizer is left empty (and the scene shown) until cava hears
+    something, and again after QUIET_AFTER of silence.
+
+    tmux starts one --stream job per attached client (the Mac and the iPad each
+    get one), so only the job holding EQ_LOCK does any of this. The others try
+    for the lock every frame and take over when the holder exits, and read
+    EQ_SHOWN meanwhile to know whether to leave room for the equalizer."""
+
+    def __init__(self):
+        self.cava = None
+        self.cava_tried = False  # started cava this time audio played (don't restart one that died)
+        self.pending = b""   # cava output after the last complete line
+        self.levels = None   # the latest complete frame from cava
+        self.heard = 0.0     # time.monotonic() of cava's last frame with any sound
+        self.shown = ""      # what EQ_OPTION holds now
+        self.visible = None  # what EQ_SHOWN holds now (this job's last write)
+        self.allowed = None  # audio capture permission, checked on the first start
+        self.lock = None     # open EQ_LOCK while this job owns the equalizer
+
+    def own_eq(self):
+        if self.lock is None:
+            f = None
+            try:
+                os.makedirs(os.path.dirname(EQ_LOCK), exist_ok=True)
+                f = open(EQ_LOCK, "w")
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.lock = f
+            except OSError:
+                if f:
+                    f.close()
+                return False
+        return True
+
+    def start(self):
+        if not self.own_eq() or self.cava or self.cava_tried:
+            return
+        self.cava_tried = True
+        if self.allowed is None:
+            self.allowed = audio_capture_allowed()
+        if not self.allowed:
+            return
+        try:
+            os.makedirs(os.path.dirname(CAVA_CONF), exist_ok=True)
+            with open(CAVA_CONF, "w") as f:
+                f.write(CAVA_CONFIG)
+            self.cava = subprocess.Popen(["cava", "-p", CAVA_CONF], stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=ENV)
+            os.set_blocking(self.cava.stdout.fileno(), False)
+        except OSError:
+            self.cava = None
+
+    def read_cava(self):
+        """Takes in whatever cava has written since the last frame."""
+        if not self.cava:
+            return
+        try:
+            chunk = os.read(self.cava.stdout.fileno(), 65536)
+        except BlockingIOError:
+            return
+        if not chunk:  # cava exited; made-up motion from here on
+            self.stop_cava()
+            return
+        lines = (self.pending + chunk).split(b"\n")
+        self.pending = lines.pop()
+        for line in lines:
+            values = [int(v) for v in line.split(b";") if v.strip().isdigit()]
+            if len(values) == WIDTH:
+                self.levels = [min(v, len(BARS) - 1) for v in values]
+                if any(values):
+                    self.heard = time.monotonic()
+
+    def audible(self):
+        """Whether the equalizer should show. Without cava there's no way to
+        tell silence from sound, so the made-up motion always shows."""
+        return not self.cava or time.monotonic() - self.heard < QUIET_AFTER
+
+    def showing(self):
+        """Whether to leave out the scene for the equalizer, from any client's job."""
+        if self.lock:
+            return bool(self.visible)
+        try:
+            with open(EQ_SHOWN) as f:
+                return f.read().strip() == "1"
+        except OSError:
+            return True  # no holder has written it yet; the equalizer as before
+
+    def set_visible(self, visible):
+        if visible == self.visible:
+            return
+        self.visible = visible
+        try:
+            with open(EQ_SHOWN, "w") as f:
+                f.write("1\n" if visible else "0\n")
+        except OSError:
+            pass
+
+    def push(self, now):
+        if not self.own_eq():
+            return
+        self.start()  # a no-op unless this job just took over the equalizer
+        self.read_cava()
+        visible = self.audible()
+        self.set_visible(visible)
+        if not visible:
+            text = ""
+        else:
+            text = eq_cells(self.levels if self.cava and self.levels else made_up_levels(now))
+        if text != self.shown:
+            set_eq_option(text)
+            self.shown = text
+
+    def stop_cava(self):
+        if self.cava:
+            self.cava.terminate()
+            try:
+                self.cava.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                self.cava.kill()
+            self.cava = None
+        self.pending, self.levels, self.heard = b"", None, 0.0
+
+    def stop(self):
+        self.stop_cava()
+        self.cava_tried = False
+        if self.shown:
+            set_eq_option("")
+            self.shown = ""
+        if self.lock:
+            self.set_visible(False)
+            self.visible = None
+            self.lock.close()  # lets another client's job take over next time
+            self.lock = None
+
+
+# Programs that keep an audio output stream open while silent (the Android
+# emulator's qemu holds one for as long as it runs). Same list as tmux-screensaver.
+SILENT_HOLDERS = ("qemu-system-",)
+
+
+def silent_holder_pids(pids):
+    """The subset of `pids` whose executable is in SILENT_HOLDERS."""
+    try:
+        out = subprocess.run(["/bin/ps", "-o", "pid=,comm=", "-p", ",".join(map(str, pids))],
+                             capture_output=True, text=True, timeout=2).stdout
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    found = set()
+    for line in out.splitlines():
+        pid, _, comm = line.strip().partition(" ")
+        if os.path.basename(comm.strip()).startswith(SILENT_HOLDERS):
+            found.add(int(pid))
+    return found
+
+
+def audio_playing():
+    """True when some process has audio output running (coreaudiod holds a sleep
+    assertion per playing client). corespeechd's "AVVC" ones follow other playback,
+    so they don't count on their own, and neither do SILENT_HOLDERS. Same check as
+    tmux-screensaver."""
+    try:
+        # errors="replace": device names come through in Mac Roman, not UTF-8 (the
+        # keyboard's "Spencer’s" apostrophe is byte 0xD5), and a strict decode raises.
+        out = subprocess.run(["/usr/bin/pmset", "-g", "assertions"],
+                             capture_output=True, text=True, errors="replace",
+                             timeout=2).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    pids = set()
+    for block in re.split(r"\n(?=\s+pid \d+\()", out):
+        if "audio-out" not in block or "AVVC" in block:
+            continue
+        pid = re.search(r"Created for PID: (\d+)", block)
+        if not pid:
+            return True
+        pids.add(int(pid.group(1)))
+    return bool(pids - silent_holder_pids(pids)) if pids else False
+
+
+def busy_agents(t):
+    try:
+        out = subprocess.run(["tmux", "list-windows", "-a", "-F", "#{@agent_busy}|#{session_name}"],
+                             capture_output=True, text=True, timeout=2, env=ENV).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    sessions = []
+    for line in out.splitlines():
+        busy, _, session = line.partition("|")
+        if busy and session not in sessions:
+            sessions.append(session)
+    return "".join(cell(SPINNER_BLUE, f"{SPINNER[(t + n) % 8]} {s} ") for n, s in enumerate(sessions))
+
+
+def any_client_active():
+    """False when no client is attached or all are in the screensaver; tmux
+    doesn't redraw their status bars then, so there's no point drawing frames."""
+    try:
+        out = subprocess.run(["tmux", "list-clients", "-F", "#{client_flags}"],
+                             capture_output=True, text=True, timeout=2, env=ENV).stdout
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return any("suspended" not in flags.split(",") for flags in out.splitlines())
+
+
+def scene(t):
+    return {"koi": koi, "petals": petals, "moon": moon, "bonsai": bonsai}[read_scene()](t)
+
+
+def stream():
+    """Agents and scene once a second on stdout; while audio plays, the equalizer
+    goes to EQ_OPTION every 1/EQ_FPS seconds, and the scene is left out unless
+    the equalizer is empty because cava hears silence."""
+    eq = LiveEqualizer()
+    # tmux stops this job with SIGTERM (or SIGHUP); exit through `finally` so
+    # cava doesn't keep capturing audio with nobody reading it
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    signal.signal(signal.SIGHUP, lambda *_: sys.exit(0))
+    set_eq_option("")  # a previous run that was killed outright may have left a frame
+    playing, next_audio, next_line = False, 0.0, 0.0
+    try:
+        while True:
+            now = time.time()
+            if now >= next_line:
+                if not any_client_active():
+                    eq.stop()
+                    playing, next_audio = False, 0.0
+                    time.sleep(IDLE_POLL)
+                    continue
+                t = int(now)
+                if now >= next_audio:
+                    playing, next_audio = audio_playing(), now + AUDIO_POLL
+                    if playing:
+                        eq.start()
+                    else:
+                        eq.stop()
+                try:
+                    sys.stdout.write(busy_agents(t) + ("" if playing and eq.showing() else scene(t)) + "\n")
+                    sys.stdout.flush()
+                except BrokenPipeError:  # tmux dropped this job (client gone, or server exited)
+                    return
+                next_line = t + 1.02  # just after the next whole second
+            if playing:
+                eq.push(now)
+                time.sleep(max(0.0, min(1 / EQ_FPS, next_line - time.time())))
+            else:
+                time.sleep(max(0.0, next_line - time.time()))
+    finally:
+        eq.stop()
+
+
+def next_scene():
+    scene = SCENES[(SCENES.index(read_scene()) + 1) % len(SCENES)]
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    with open(STATE, "w") as f:
+        f.write(scene + "\n")
+    subprocess.run(["tmux", "refresh-client", "-S"], env=ENV)
+    subprocess.run(["tmux", "display-message", f"status animation: {scene}"], env=ENV)
+
+
+def main():
+    if sys.argv[1:] == ["next"]:
+        next_scene()
+    elif sys.argv[1:] == ["--stream"]:
+        stream()
+    else:
+        now = time.time()
+        shown = eq_cells(made_up_levels(now)) if audio_playing() else scene(int(now))
+        sys.stdout.write(busy_agents(int(now)) + shown)
+
+
+if __name__ == "__main__":
+    main()

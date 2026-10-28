@@ -1,0 +1,883 @@
+#!/usr/bin/env python3
+"""tmux-screensaver: tmux runs this as its lock-command after the session sits
+idle (lock-after-time in ~/.tmux.conf), or on demand with prefix + B.
+
+Each animation runs in its own pseudo-terminal that never receives keystrokes,
+so this script decides what keys do:
+
+  j  down  right    next animation (a random one)
+  k  up    left     previous animation (back through the ones already shown)
+  q q               exit (two presses within a second), which unlocks tmux and
+                    plays a dorky 8-bit chime (over mosh, rings the terminal bell
+                    instead, so the sound comes from the iPad rather than the Mac)
+
+Every other key is ignored.
+
+Animations come up in random order: each one is shown once before any repeats.
+The audio visualizer is only picked while some other process is playing audio
+that a small raw cava probe can actually hear (Safari holds the speakers open for
+as long as a tab has media in it, playing or not), and it is left for another
+animation after the audio has been silent a while.
+When audio starts (or is already playing when the screensaver opens), it switches
+straight to the visualizer. Switching away with j/k sticks until the audio stops
+and starts again. Where macOS wouldn't let cava capture audio (over mosh, the
+responsible process isn't Ghostty), the visualizer is left out entirely, since
+cava would open System Settings on the Mac to ask.
+
+On the Mac (not over mosh), the animation is paused while the Mac's screen is
+locked or its display is asleep, since nobody can see it and Ghostty would
+otherwise keep rendering it.
+
+tmux doesn't draw its status bar while locked, so the windows flagged by
+tmux-agent-notify (agent finished, or waiting on you) are shown bottom-left.
+
+  tmux-screensaver --chime    play the chime (writes the sound file first if missing)
+  tmux-screensaver --join SESSION CLIENT
+                              lock CLIENT if another client on SESSION is locked
+                              (tmux's client-attached hook runs this)
+"""
+
+import ctypes
+import errno
+import fcntl
+import os
+import pty
+import random
+import select
+import signal
+import re
+import struct
+import subprocess
+import sys
+import termios
+import time
+import tty
+import wave
+from array import array
+from math import pi, sin
+
+# City for the star map; any name from astroterm's cities.csv works
+ASTRO_CITY = os.environ.get("ASTRO_CITY", "Austin")
+VISUALIZER = "visualizer"
+
+# Frame rates are kept low: these run unattended, and Ghostty (or mosh, to the
+# iPad) has to draw every frame
+SAVERS = [
+    ("great wave", ["kanagawa-wave", "--fps", "12"]),
+    ("bonsai", ["cbonsai", "-l", "-i", "-w", "4"]),
+    ("pipes", ["pipes.sh", "-p", "4", "-R", "-r", "3000", "-f", "30"]),
+    ("matrix", ["cmatrix", "-b", "-u", "5", "-C", "blue"]),
+    ("stars", ["astroterm", "-c", "-u", "-C", "-i", ASTRO_CITY, "-f", "4"]),
+    ("aquarium", ["asciiquarium"]),
+    # System audio via a Core Audio tap; exits (and is skipped) without Ghostty's
+    # System Audio Recording permission
+    (VISUALIZER, ["cava"]),
+]
+
+NEXT_KEYS = {b"j", b"\x1b[B", b"\x1b[C", b"\x1bOB", b"\x1bOC"}
+PREV_KEYS = {b"k", b"\x1b[A", b"\x1b[D", b"\x1bOA", b"\x1bOD"}
+QUIT_WINDOW = 1.0  # seconds allowed between the two q presses
+HINT_SECONDS = 2.5
+# Kanagawa Dragon as "r;g;b", matching tmux-agent-notify's status-left colors
+GREEN, ORANGE, DIM, BAR_BG = "152;187;108", "255;160;102", "115;124;115", "40;39;39"
+AUDIO_POLL = 2.0     # seconds between audio checks while the visualizer runs
+SILENCE_LIMIT = 8.0  # seconds of silence before leaving the visualizer
+HEARD_WITHIN = 3.0   # the probe counts audio as playing if it heard any this recently
+PROBE_CONF = os.path.expanduser("~/.local/state/tmux-screensaver-probe.cava")
+PROBE_CONFIG = """\
+; Written by tmux-screensaver for its audio probe; changes are overwritten.
+[general]
+framerate = 10
+bars = 4
+[input]
+method = coreaudio
+source = tap
+[output]
+method = raw
+raw_target = /dev/stdout
+data_format = ascii
+ascii_max_range = 100
+bar_delimiter = 59
+frame_delimiter = 10
+channels = mono
+"""
+SCREEN_POLL = 2.0    # seconds between checks for the Mac being locked or asleep
+NOTIFY_POLL = 1.0    # seconds between checks for agent notifications
+# Over mosh nothing says whether the iPad is still looking (it can sit in the
+# screensaver for a day), so after this long without a key the animation is
+# stopped and a resting screen is shown instead. Its keys are the screensaver's:
+# j/k bring an animation back, qq exits, anything else is ignored.
+# Kept short because waking the iPad into a full-screen animation (cmatrix most
+# visibly) has twice left Blink's display scrambled with leftover characters,
+# while the resting screen changes only a few cells per redraw.
+REST_AFTER = 120.0
+REST_TICK = 2.0      # seconds between resting-screen redraws (its dots step once per redraw)
+REST_MOVE = 30.0     # seconds between moves of the resting screen to a new spot
+GOLD, SOFT = "196;178;138", "166;166;156"
+# Nerd Font weather moons, new to waning crescent (same glyphs as tmux-status-anim)
+MOONS = [chr(c) for c in range(0xE38D, 0xE3A9)]
+CHIME = os.path.expanduser("~/.local/share/tmux-screensaver/chime.wav")
+
+STDIN, STDOUT = sys.stdin.fileno(), sys.stdout.fileno()
+ENV = dict(os.environ, PATH=f"{os.path.expanduser('~/.local/bin')}:/opt/homebrew/bin:{os.environ.get('PATH', '')}")
+# The animations run in this script's own pseudo-terminals, not a tmux pane;
+# kanagawa-wave would otherwise pause whenever an inherited pane is out of view
+ENV.pop("TMUX_PANE", None)
+
+
+def write(data):
+    if isinstance(data, str):
+        data = data.encode()
+    while data:
+        try:
+            data = data[os.write(STDOUT, data):]
+        except InterruptedError:
+            continue
+
+
+def term_size():
+    cols, rows = os.get_terminal_size(STDOUT)
+    return rows, cols
+
+
+def winsize(rows, cols):
+    return struct.pack("HHHH", rows, cols, 0, 0)
+
+
+class Saver:
+    """One animation running in a pseudo-terminal sized to the real one."""
+
+    def __init__(self, argv):
+        rows, cols = term_size()
+        self.pid, self.fd = pty.fork()
+        if self.pid == 0:
+            try:
+                # Drop the handlers inherited from this script first: setting the
+                # size sends this new process SIGWINCH, and our handler would run
+                # here against the previous animation's closed pty
+                for sig in (signal.SIGWINCH, signal.SIGTERM, signal.SIGHUP):
+                    signal.signal(sig, signal.SIG_DFL)
+                fcntl.ioctl(0, termios.TIOCSWINSZ, winsize(rows, cols))
+                os.execvpe(argv[0], argv, ENV)
+            finally:
+                os._exit(127)
+
+    def resize(self):
+        fcntl.ioctl(self.fd, termios.TIOCSWINSZ, winsize(*term_size()))
+
+    def read(self):
+        """Output from the animation, or None once it has exited."""
+        try:
+            data = os.read(self.fd, 65536)
+        except OSError as e:
+            if e.errno == errno.EIO:  # the child closed its end of the pty
+                return None
+            raise
+        return data or None
+
+    def pause(self, paused):
+        signal_group(self.pid, signal.SIGSTOP if paused else signal.SIGCONT)
+
+    def stop(self):
+        signal_group(self.pid, signal.SIGTERM)
+        signal_group(self.pid, signal.SIGCONT)  # a paused animation only sees SIGTERM once resumed
+        # Closing our end hangs up the pty, so an animation blocked writing a
+        # frame we will never read gets EIO and exits instead of waiting forever
+        os.close(self.fd)
+        try:
+            deadline = time.monotonic() + 0.5
+            while time.monotonic() < deadline:
+                if os.waitpid(self.pid, os.WNOHANG)[0]:
+                    return
+                time.sleep(0.02)
+            signal_group(self.pid, signal.SIGKILL)
+            os.waitpid(self.pid, 0)
+        except ChildProcessError:  # already reaped
+            pass
+
+
+def signal_group(pid, sig):
+    # macOS answers EPERM, not ESRCH, when the group holds only a zombie
+    try:
+        os.killpg(pid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+# Programs that keep an audio output stream open while silent, so their assertion
+# says nothing about whether anything is audible. The Android emulator (qemu) holds
+# one on the speakers for as long as it runs. Matched against the start of the
+# executable's file name.
+SILENT_HOLDERS = ("qemu-system-",)
+
+
+def silent_holder_pids(pids):
+    """The subset of `pids` whose executable is in SILENT_HOLDERS."""
+    try:
+        out = subprocess.run(["/bin/ps", "-o", "pid=,comm=", "-p", ",".join(map(str, pids))],
+                             capture_output=True, text=True, timeout=2).stdout
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    found = set()
+    for line in out.splitlines():
+        pid, _, comm = line.strip().partition(" ")
+        if os.path.basename(comm.strip()).startswith(SILENT_HOLDERS):
+            found.add(int(pid))
+    return found
+
+
+def audio_playing(exclude=()):
+    """True when a process outside `exclude` has audio output running.
+
+    coreaudiod holds a sleep assertion per playing client, naming the PID it was
+    created for, so the visualizer's own capture can be left out. Assertions on
+    "AVVC" aggregate devices belong to corespeechd, which follows other playback
+    (echo cancellation) rather than being audio itself. Programs in SILENT_HOLDERS
+    don't count either.
+    """
+    try:
+        # errors="replace": device names come through in Mac Roman, not UTF-8 (the
+        # keyboard's "Spencer’s" apostrophe is byte 0xD5), and a strict decode raises.
+        out = subprocess.run(["/usr/bin/pmset", "-g", "assertions"],
+                             capture_output=True, text=True, errors="replace",
+                             timeout=2).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    pids = set()
+    for block in re.split(r"\n(?=\s+pid \d+\()", out):
+        if "audio-out" not in block or "AVVC" in block:
+            continue
+        pid = re.search(r"Created for PID: (\d+)", block)
+        if not pid:
+            return True
+        if int(pid.group(1)) not in exclude:
+            pids.add(int(pid.group(1)))
+    return bool(pids - silent_holder_pids(pids)) if pids else False
+
+
+class AudioProbe:
+    """A raw-mode cava run while some app holds an audio output open, to tell
+    real sound from a silent hold: its frames are all zeros when nothing is
+    audible. Only used where audio capture is allowed (see audio_capture_allowed)."""
+
+    def __init__(self):
+        self.proc = None
+        self.heard = 0.0  # time.monotonic() of the last frame with any sound
+
+    def start(self):
+        if self.proc:
+            return
+        try:
+            os.makedirs(os.path.dirname(PROBE_CONF), exist_ok=True)
+            with open(PROBE_CONF, "w") as f:
+                f.write(PROBE_CONFIG)
+            self.proc = subprocess.Popen(["cava", "-p", PROBE_CONF], stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=ENV)
+            os.set_blocking(self.proc.stdout.fileno(), False)
+        except OSError:
+            self.proc = None
+
+    def read(self):
+        """Takes in the frames since the last read. False once cava has exited."""
+        try:
+            chunk = os.read(self.proc.stdout.fileno(), 65536)
+        except BlockingIOError:
+            return True
+        if not chunk:
+            return False
+        # Frames can pile up between reads; date the last one with sound by how
+        # many came after it, at the probe's 10 frames a second
+        frames = chunk.rstrip(b"\n").split(b"\n")
+        for after, frame in enumerate(reversed(frames)):
+            if any(c not in b"0;" for c in frame):
+                self.heard = max(self.heard, time.monotonic() - after / 10)
+                break
+        return True
+
+    def listen(self, seconds):
+        """Waits up to `seconds` for sound. True if some was heard."""
+        self.start()
+        if not self.proc:
+            return True  # couldn't start cava; trust the audio-out assertion
+        deadline = time.monotonic() + seconds
+        while self.proc and time.monotonic() < deadline:
+            select.select([self.proc.stdout], [], [], max(0.0, deadline - time.monotonic()))
+            if not self.read():
+                self.stop()
+                return True  # cava died; fall back to trusting the audio-out assertion
+            if time.monotonic() - self.heard < HEARD_WITHIN:
+                return True
+        return False
+
+    def hearing(self):
+        """Whether cava heard sound within HEARD_WITHIN. True if it couldn't run,
+        so the audio-out assertion alone decides, as before the probe."""
+        self.start()
+        if not self.proc or not self.read():
+            self.stop()
+            return True
+        return time.monotonic() - self.heard < HEARD_WITHIN
+
+    def stop(self):
+        if self.proc:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
+            self.proc.stdout.close()
+            self.proc = None
+        self.heard = 0.0
+
+
+class MacScreen:
+    """Whether the Mac's own screen is locked or its display asleep, from
+    CoreGraphics. Outside the Mac's login session (e.g. over mosh) there is no
+    session to ask, and it reports the screen as visible."""
+
+    def __init__(self):
+        self.cg = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+        self.cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        self.cg.CGSessionCopyCurrentDictionary.restype = ctypes.c_void_p
+        self.cg.CGMainDisplayID.restype = ctypes.c_uint32
+        self.cg.CGDisplayIsAsleep.argtypes = [ctypes.c_uint32]
+        self.cg.CGDisplayIsAsleep.restype = ctypes.c_uint32
+        self.cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+        self.cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+        self.cf.CFDictionaryGetValue.restype = ctypes.c_void_p
+        self.cf.CFDictionaryGetValue.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        self.cf.CFBooleanGetValue.restype = ctypes.c_bool
+        self.cf.CFBooleanGetValue.argtypes = [ctypes.c_void_p]
+        self.cf.CFRelease.argtypes = [ctypes.c_void_p]
+        self.locked_key = self.cf.CFStringCreateWithCString(None, b"CGSSessionScreenIsLocked", 0x08000100)
+
+    def hidden(self):
+        if self.cg.CGDisplayIsAsleep(self.cg.CGMainDisplayID()):
+            return True
+        session = self.cg.CGSessionCopyCurrentDictionary()
+        if not session:
+            return False
+        try:
+            locked = self.cf.CFDictionaryGetValue(session, self.locked_key)
+            return bool(locked) and self.cf.CFBooleanGetValue(locked)
+        finally:
+            self.cf.CFRelease(session)
+
+
+def agent_notifications():
+    """Windows flagged by tmux-agent-notify, oldest first, as (state, "session:window")."""
+    try:
+        out = subprocess.run(
+            ["tmux", "list-windows", "-a", "-F", "#{@agent_at}|#{@agent_state}|#{session_name}:#{window_name}"],
+            capture_output=True, text=True, timeout=2, env=ENV).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    rows = [line.split("|", 2) for line in out.splitlines()]
+    rows = sorted((r for r in rows if len(r) == 3 and r[1]), key=lambda r: int(r[0] or 0))
+    return [(state, name) for _, state, name in rows]
+
+
+def audio_capture_allowed():
+    """Whether cava would be allowed to capture system audio from here, checked
+    without asking. macOS decides by the *responsible* process: Ghostty for a
+    tmux client running in it (granted), but the mosh-server chain for one on
+    the iPad (never granted). cava denied there runs `open` on the Privacy pane,
+    popping System Settings up on the Mac whenever audio starts."""
+    try:
+        tcc = ctypes.CDLL("/System/Library/PrivateFrameworks/TCC.framework/TCC")
+        cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+        cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+        tcc.TCCAccessPreflight.restype = ctypes.c_int
+        tcc.TCCAccessPreflight.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        service = cf.CFStringCreateWithCString(None, b"kTCCServiceAudioCapture", 0x08000100)
+        return tcc.TCCAccessPreflight(service, None) == 0  # 0 granted, 1 denied, 2 never asked
+    except (OSError, AttributeError):
+        return False
+
+
+def moon_phase():
+    synodic = 29.530588853
+    age = ((time.time() - 947182440) / 86400) % synodic  # since the new moon of 2000-01-06 18:14 UTC
+    return MOONS[round(age / synodic * 28) % 28]
+
+
+def under_mosh():
+    """True when this terminal is a mosh session (mosh-server is an ancestor)."""
+    pid = os.getppid()
+    while pid > 1:
+        try:
+            out = subprocess.run(["/bin/ps", "-o", "ppid=,comm=", "-p", str(pid)],
+                                 capture_output=True, text=True, timeout=2).stdout.split(None, 1)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if len(out) < 2:
+            return False
+        if os.path.basename(out[1].strip()) == "mosh-server":
+            return True
+        pid = int(out[0])
+    return False
+
+
+class Screensaver:
+    def __init__(self):
+        self.history = []  # SAVERS indexes in the order shown; k walks back
+        self.pos = -1
+        self.deck = []     # shuffled indexes not yet shown this round
+        self.saver = None
+        self.hint = ""
+        self.hint_until = 0.0
+        self.hint_drawn = ""
+        self.last_q = 0.0
+        self.next_audio_check = 0.0
+        self.last_audio = 0.0
+        self.was_playing = False  # audio seen on the last check, to catch it starting
+        self.notices = []
+        self.next_notice_check = 0.0
+        self.notice_width = 0  # columns the last notice line covered
+        self.pending = b""  # animation output cut off partway through an escape code
+        self.mosh = under_mosh()
+        self.can_visualize = audio_capture_allowed()
+        self.probe = AudioProbe() if self.can_visualize else None
+        try:
+            self.mac_screen = None if self.mosh else MacScreen()
+        except (OSError, AttributeError):  # CoreGraphics unavailable; never pause
+            self.mac_screen = None
+        self.paused = False
+        self.next_screen_check = 0.0
+        self.last_key = time.monotonic()
+        self.resting = False
+        self.rest_frame = 0
+        self.next_rest_tick = 0.0
+        self.next_rest_move = 0.0
+        self.rest_at = None     # (row, col) of the resting block's top-left, 1-based
+        self.rest_size = (0, 0)  # (lines, width) it last covered, to erase it on a move
+
+    @property
+    def current(self):
+        return self.history[self.pos] if self.history else None
+
+    def is_visualizer(self, index):
+        return SAVERS[index][0] == VISUALIZER
+
+    def draw(self):
+        """A random animation other than the current one, dealt from a shuffled
+        deck so every animation comes up once before any repeats."""
+        for _ in range(2):
+            if not self.deck:
+                self.deck = random.sample(range(len(SAVERS)), len(SAVERS))
+            for i, index in enumerate(self.deck):
+                if index == self.current:
+                    continue
+                if self.is_visualizer(index):
+                    if not self.can_visualize:
+                        continue
+                    if not self.was_playing:
+                        continue  # stays in the deck for when audio is playing
+                return self.deck.pop(i)
+            self.deck = []  # only the current one or a silent visualizer left
+        return self.current
+
+    def next(self):
+        self.show(self.draw())
+
+    def show(self, index):
+        del self.history[self.pos + 1:]
+        self.history.append(index)
+        self.pos += 1
+        self.start()
+
+    def visualizer_index(self):
+        return next(i for i, (name, _) in enumerate(SAVERS) if name == VISUALIZER)
+
+    def previous(self):
+        for pos in range(self.pos - 1, -1, -1):
+            index = self.history[pos]
+            if index != self.current and not (self.is_visualizer(index) and not self.was_playing):
+                self.pos = pos
+                self.start()
+                return
+
+    def start(self):
+        if self.saver:
+            self.saver.stop()
+        self.pending = b""
+        write("\x1b[0m\x1b[2J\x1b[H")
+        name, argv = SAVERS[self.current]
+        self.saver = Saver(argv)
+        if self.paused:
+            self.saver.pause(True)
+        self.last_audio = time.monotonic()
+        self.show_hint(f"{name}  ·  j/k switch")
+
+    def check_screen(self):
+        """Pauses the animation while the Mac's screen is locked or asleep."""
+        now = time.monotonic()
+        if not self.mac_screen or now < self.next_screen_check:
+            return
+        self.next_screen_check = now + SCREEN_POLL
+        hidden = self.mac_screen.hidden()
+        if hidden != self.paused:
+            self.paused = hidden
+            self.saver.pause(hidden)
+            if hidden and self.probe:
+                self.probe.stop()  # nothing reads it while paused; started again after
+
+    def rest(self):
+        """Stops the animation and shows the resting screen in its place."""
+        self.saver.stop()
+        self.saver = None
+        self.pending = b""
+        self.resting = True
+        self.clear_for_rest()
+
+    def wake(self, fresh=False):
+        """Back to an animation: a new one (j), or the one that was showing
+        before the rest (k), which is as far back as k can go from here."""
+        self.resting = False
+        if fresh:
+            self.next()
+        else:
+            self.start()
+
+    def clear_for_rest(self):
+        write("\x1b[0m\x1b[2J")
+        self.hint_until = 0.0
+        self.hint_drawn = ""
+        self.notice_width = 0
+        self.rest_at = None
+        self.next_rest_tick = 0.0
+
+    def resize(self):
+        if self.resting:
+            self.clear_for_rest()  # redrawn in the new size on the next loop
+        elif self.saver:
+            self.saver.resize()
+
+    def draw_rest(self):
+        """A moon and clock with stepping dots, moved to a random spot every
+        REST_MOVE seconds, so the screen visibly ticks without an animation's
+        stream of frames. The bottom row stays free for the agent notices."""
+        now = time.monotonic()
+        if now < self.next_rest_tick:
+            return
+        self.next_rest_tick = now + REST_TICK
+        self.rest_frame += 1
+        lines = [
+            (GOLD, f"{moon_phase()}  {time.strftime('%H:%M')}"),
+            (DIM, f"resting{'.' * (self.rest_frame % 3 + 1):<3}"),
+            (DIM, "get back to work"),
+        ]
+        width = max(len(text) for _, text in lines)
+        rows, cols = term_size()
+        if self.rest_at is None or now >= self.next_rest_move:
+            self.next_rest_move = now + REST_MOVE
+            if self.rest_at:
+                row, col = self.rest_at
+                for i in range(self.rest_size[0]):
+                    write(f"\x1b[{row + i};{col}H\x1b[0m{' ' * self.rest_size[1]}")
+            top = max(1, rows - len(lines))  # last row a block can start on above the notices
+            self.rest_at = (random.randint(1, top), random.randint(1, max(1, cols - width + 1)))
+        self.rest_size = (len(lines), width)
+        row, col = self.rest_at
+        for i, (color, text) in enumerate(lines):
+            write(f"\x1b[{row + i};{col}H\x1b[0;38;2;{color}m{text:<{width}}")
+        write("\x1b[0m")
+
+    def audible(self, exclude=()):
+        """Whether audio is playing that can be heard: an audio-out assertion
+        (outside `exclude`) confirmed by the probe, which runs only while one is held."""
+        if not audio_playing(exclude):
+            if self.probe:
+                self.probe.stop()
+            return False
+        return self.probe.hearing() if self.probe else True
+
+    def check_audio(self):
+        """Switches to the visualizer when audio starts playing, and leaves it once
+        the audio has been silent for SILENCE_LIMIT."""
+        now = time.monotonic()
+        if now < self.next_audio_check:
+            return
+        self.next_audio_check = now + AUDIO_POLL
+        on_visualizer = self.is_visualizer(self.current)
+        playing = self.audible(exclude={self.saver.pid} if on_visualizer else ())
+        started = playing and not self.was_playing
+        self.was_playing = playing
+        if on_visualizer:
+            if playing:
+                self.last_audio = now
+            elif now - self.last_audio > SILENCE_LIMIT:
+                self.next()
+        elif started and self.can_visualize:
+            self.show(self.visualizer_index())
+
+    def show_hint(self, text):
+        self.hint = text
+        self.hint_until = time.monotonic() + HINT_SECONDS
+
+    def draw_hint(self):
+        """Bottom-right label over the animation; redrawn after each frame while it lasts."""
+        rows, cols = term_size()
+        if time.monotonic() < self.hint_until:
+            label = f" {self.hint} "[:cols]
+            # Save cursor and colors, draw, restore, so the animation is undisturbed
+            write(f"\x1b7\x1b[{rows};{cols - len(label) + 1}H\x1b[0;38;2;166;166;156;48;2;40;39;39m{label}\x1b8")
+            self.hint_drawn = label
+        elif self.hint_drawn:
+            write(f"\x1b7\x1b[{rows};{cols - len(self.hint_drawn) + 1}H\x1b[0m{' ' * len(self.hint_drawn)}\x1b8")
+            self.hint_drawn = ""
+
+    def draw_notices(self):
+        """Agent notifications bottom-left, colored like tmux's status-left, and
+        cut short so they never run under the hint on the right."""
+        now = time.monotonic()
+        if now >= self.next_notice_check:
+            self.next_notice_check = now + NOTIFY_POLL
+            self.notices = agent_notifications()
+        if not self.notices and not self.notice_width:
+            return
+        rows, cols = term_size()
+        room = max(0, cols - len(self.hint_drawn) - 1)
+        parts = [(DIM, " 󰂚 ")] if self.notices else []
+        for state, name in self.notices:
+            parts.append((ORANGE, f"󰋗 {name} ") if state == "input" else (GREEN, f"󰄬 {name} "))
+        line, width = "", 0
+        for color, text in parts:
+            text = text[:room - width]
+            line += f"\x1b[38;2;{color}m{text}"
+            width += len(text)
+        pad = " " * max(0, min(self.notice_width, room) - width)
+        write(f"\x1b7\x1b[{rows};1H\x1b[0;48;2;{BAR_BG}m{line}\x1b[0m{pad}\x1b8")
+        self.notice_width = width
+
+    def handle_keys(self, data):
+        """Returns True when the user asked to exit."""
+        self.last_key = time.monotonic()
+        for key in split_keys(data):
+            if key in (b"q", b"Q"):
+                now = time.monotonic()
+                if now - self.last_q < QUIT_WINDOW:
+                    return True
+                self.last_q = now
+                self.show_hint("q again to exit")  # not drawn on the resting screen
+            elif key in NEXT_KEYS:
+                if self.resting:
+                    self.wake(fresh=True)
+                else:
+                    self.next()
+            elif key in PREV_KEYS:
+                if self.resting:
+                    self.wake()
+                else:
+                    self.previous()
+        return False
+
+    def run(self):
+        """Returns True when the user quit with qq."""
+        # Give the probe a moment to hear audio that's already playing, so the
+        # visualizer comes up first rather than a couple of seconds in
+        self.was_playing = audio_playing() and (not self.probe or self.probe.listen(1.0))
+        if self.was_playing and self.can_visualize:
+            self.show(self.visualizer_index())
+        else:
+            self.next()
+        while True:
+            fds = [STDIN] if self.resting else [STDIN, self.saver.fd]
+            ready, _, _ = select.select(fds, [], [], 0.25)
+            if STDIN in ready:
+                try:
+                    keys = os.read(STDIN, 64)
+                except OSError:
+                    keys = b""
+                if not keys:
+                    # The terminal is gone (its tmux client died). Reading would
+                    # return nothing forever, so stop rather than spin.
+                    return False
+                if self.handle_keys(keys):
+                    return True
+                continue  # a switch replaced the pty, so `ready` is stale
+            if self.resting:
+                self.draw_rest()
+                self.draw_notices()
+                continue
+            if self.mosh and time.monotonic() - self.last_key > REST_AFTER:
+                self.rest()
+                continue
+            if self.saver.fd in ready:
+                out = self.saver.read()
+                if out is None:
+                    self.next()  # it exited on its own; move on
+                    continue
+                # Hold back a cut-off escape code or character until the rest
+                # arrives; the overlays drawn below would otherwise land inside it
+                # and the terminal would print the remainder as text
+                out, self.pending = split_complete(self.pending + out)
+                write(out)
+            self.check_screen()
+            if self.paused:
+                continue  # nothing new to draw, and nobody to see it
+            self.draw_hint()
+            self.draw_notices()
+            self.check_audio()
+
+
+def split_complete(data):
+    """Splits terminal output into (whole, rest): `rest` is a trailing escape code
+    or UTF-8 character that hasn't fully arrived yet. Anything stuck pending past
+    4 KB (a malformed code) is let through rather than held forever."""
+    esc = data.rfind(b"\x1b")
+    if esc != -1 and not escape_complete(data[esc:]):
+        if len(data) - esc > 4096:
+            return data, b""
+        return data[:esc], data[esc:]
+    # A UTF-8 lead byte near the end without all its continuation bytes
+    for back in range(1, min(4, len(data)) + 1):
+        byte = data[-back]
+        if byte & 0xC0 == 0x80:
+            continue  # continuation byte; keep looking for the lead
+        if byte >= 0xC0:
+            need = 2 if byte < 0xE0 else 3 if byte < 0xF0 else 4
+            if back < need:
+                return data[:-back], data[-back:]
+        break
+    return data, b""
+
+
+def escape_complete(seq):
+    """Whether `seq` (starting at ESC) holds a whole escape sequence."""
+    if len(seq) < 2:
+        return False
+    kind = seq[1]
+    if kind == 0x5B:  # CSI: parameters and intermediates, then a final byte 0x40-0x7E
+        return any(0x40 <= b <= 0x7E for b in seq[2:])
+    if kind in (0x5D, 0x50, 0x5F, 0x5E):  # OSC, DCS, APC, PM: end at BEL or ESC \
+        return b"\x07" in seq[2:] or b"\x1b\\" in seq[2:]
+    if 0x20 <= kind <= 0x2F:  # e.g. ESC ( B: intermediates, then a final byte
+        return any(b >= 0x30 for b in seq[2:])
+    return True  # two-byte sequences like ESC 7
+
+
+def split_keys(data):
+    """Bytes from the terminal as individual keys, keeping arrow sequences whole."""
+    keys, i = [], 0
+    while i < len(data):
+        if data[i:i + 1] == b"\x1b" and data[i + 1:i + 2] in (b"[", b"O") and i + 2 < len(data):
+            keys.append(data[i:i + 3])
+            i += 3
+        else:
+            keys.append(data[i:i + 1])
+            i += 1
+    return keys
+
+
+def make_chime(path):
+    """Writes an 8-bit "power up" blip: a square-wave arpeggio up C major, an
+    octave lower and smoothed so it isn't shrill. About a quarter second."""
+    rate = 44100
+    # (frequency, seconds); the last note gets vibrato
+    notes = [(261.63, 0.04), (329.63, 0.04), (392.00, 0.04), (523.25, 0.12)]
+    samples, phase, smooth = [], 0.0, 0.0
+    for i, (freq, seconds) in enumerate(notes):
+        last = i == len(notes) - 1
+        count = int(rate * seconds)
+        for n in range(count):
+            t = n / rate
+            wobble = 1 + (0.02 * sin(2 * pi * 16 * t) if last else 0)
+            phase = (phase + freq * wobble / rate) % 1.0
+            fade = (1 - n / count) ** 2 if last else 1.0
+            gate = 1.0 if n < count - 40 or last else 0.0  # tiny gap between notes
+            square = 0.5 if phase < 0.5 else -0.5
+            smooth += 0.18 * (square - smooth)  # one-pole low-pass takes the edge off
+            samples.append(smooth * fade * gate)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with wave.open(path + ".tmp", "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(rate)
+        out.writeframes(array("h", (int(v * 20000) for v in samples)).tobytes())
+    os.replace(path + ".tmp", path)
+
+
+def chime():
+    if not os.path.exists(CHIME):
+        make_chime(CHIME)
+    subprocess.run(["/usr/bin/afplay", "-v", "0.3", CHIME])
+
+
+def play_chime_detached():
+    """The chime outlives this script, so tmux unlocks without waiting for it."""
+    subprocess.Popen([sys.executable, os.path.abspath(__file__), "--chime"],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def join(session, client):
+    """A client that attaches while another client on the session is in the
+    screensaver starts in it too, instead of skipping past it."""
+    try:
+        out = subprocess.run(["tmux", "list-clients", "-t", session, "-F", "#{client_name} #{client_flags}"],
+                             capture_output=True, text=True, timeout=2, env=ENV).stdout
+    except (OSError, subprocess.SubprocessError):
+        return
+    for line in out.splitlines():
+        name, _, flags = line.partition(" ")
+        if name != client and "suspended" in flags.split(","):
+            subprocess.run(["tmux", "lock-client", "-t", client], env=ENV)
+            return
+
+
+def mark_seen():
+    """Quitting lands on the window behind the screensaver, which counts as
+    visiting it, so clear its agent notification like switching to it would."""
+    try:
+        client = os.ttyname(STDIN)
+        window = subprocess.run(["tmux", "display", "-p", "-c", client, "#{window_id}"],
+                                capture_output=True, text=True, timeout=2, env=ENV).stdout.strip()
+        if window:
+            subprocess.run([os.path.expanduser("~/.local/bin/tmux-agent-notify"), "seen", window],
+                           stdin=subprocess.DEVNULL, timeout=5, env=ENV)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def main():
+    if sys.argv[1:] == ["--chime"]:
+        chime()
+        return
+    if len(sys.argv) == 4 and sys.argv[1] == "--join":
+        join(sys.argv[2], sys.argv[3])
+        return
+    old = termios.tcgetattr(STDIN)
+    saver = Screensaver()
+
+    def on_resize(*_):
+        saver.resize()
+
+    signal.signal(signal.SIGWINCH, on_resize)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    signal.signal(signal.SIGHUP, lambda *_: sys.exit(0))
+    write("\x1b[?1049h\x1b[?25l")
+    tty.setraw(STDIN)
+    quit = False
+    try:
+        quit = saver.run()
+    finally:
+        # Restore the terminal first, so tmux comes back usable even if cleanup fails
+        termios.tcsetattr(STDIN, termios.TCSADRAIN, old)
+        write("\x1b[0m\x1b[r\x1b[2J\x1b[?25h\x1b[?1049l")
+        if saver.saver:
+            saver.saver.stop()
+        if saver.probe:
+            saver.probe.stop()
+    if quit:
+        mark_seen()
+        if saver.mosh:
+            write("\a")
+        else:
+            play_chime_detached()
+
+
+if __name__ == "__main__":
+    main()

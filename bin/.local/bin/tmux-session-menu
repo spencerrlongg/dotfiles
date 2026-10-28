@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# fzf picker for every tmux session/window. Runs inside display-popup, bound to prefix + j.
+# Opens in navigation mode: j/k move, Enter picks, 0-9 jump straight to the numbered
+# session. / switches to search (typing filters, j/k type letters); Esc goes back to
+# navigation, and Esc again closes the popup.
+set -euo pipefail
+
+# Kanagawa Dragon palette, matching the tmux status bar
+GREEN=$'\033[38;2;152;187;108m'   # #98bb6c  session
+FG=$'\033[38;2;197;201;197m'      # #c5c9c5  window name
+ORANGE=$'\033[38;2;255;160;102m'  # #ffa066  agent waiting on you
+SAGE=$'\033[38;2;135;169;135m'    # #87a987  directory
+DIM=$'\033[38;2;98;94;90m'        # #625e5a  separators
+HEAD=$'\033[1;38;2;115;124;115m'  # #737c73  column labels
+OFF=$'\033[0m'
+
+# Session order. tmux itself always lists sessions alphabetically, so the picker
+# sorts them: TOP first in this order, then any others in tmux's order, then BOTTOM.
+# Sessions that aren't running are skipped. The first ten get digit hotkeys 0-9.
+TOP=(showcase root-claude snipe-mobile)
+BOTTOM=(claude-workspace)
+
+RUNNING=()
+while IFS= read -r name; do RUNNING+=("$name"); done < <(tmux list-sessions -F '#{session_name}')
+running() { [[ " ${RUNNING[*]} " == *" $1 "* ]]; }
+pinned() { [[ " ${TOP[*]} ${BOTTOM[*]} " == *" $1 "* ]]; }
+
+SESSIONS=()
+for name in "${TOP[@]}"; do running "$name" && SESSIONS+=("$name"); done
+for name in "${RUNNING[@]}"; do pinned "$name" || SESSIONS+=("$name"); done
+for name in "${BOTTOM[@]}"; do running "$name" && SESSIONS+=("$name"); done
+
+# One row per window: target|session|window|directory|agent state, grouped in session
+# order. Agent state is the flag tmux-agent-notify sets (done or input), shown as a mark.
+# Read once so the column widths can be sized to the longest session and window names.
+WINDOWS=$(for name in "${SESSIONS[@]}"; do
+  tmux list-windows -t "=$name" -F \
+    '#{session_name}:#{window_index}|#{session_name}|#{window_name}|#{b:pane_current_path}|#{@agent_state}'
+done)
+
+# Widths are shared by the header and the rows so the columns line up. Never
+# narrower than the column labels.
+W_SESSION=$(awk -F'|' 'BEGIN { m = length("SESSION") } length($2) > m { m = length($2) } END { print m }' <<<"$WINDOWS")
+W_WINDOW=$(awk -F'|' 'BEGIN { m = length("WINDOW") } length($3) > m { m = length($3) } END { print m }' <<<"$WINDOWS")
+
+header() {
+  printf "%s#%s %s│%s %s%-${W_SESSION}s%s %s│%s %s%-${W_WINDOW}s%s   %s│%s %s%s%s" \
+    "$HEAD" "$OFF" "$DIM" "$OFF" \
+    "$HEAD" SESSION "$OFF" "$DIM" "$OFF" \
+    "$HEAD" WINDOW  "$OFF" "$DIM" "$OFF" \
+    "$HEAD" DIRECTORY "$OFF"
+}
+
+list() {
+  awk -F'|' -v g="$GREEN" -v f="$FG" -v s="$SAGE" -v d="$DIM" -v o="$OFF" -v r="$ORANGE" \
+          -v ws="$W_SESSION" -v ww="$W_WINDOW" -v names="${SESSIONS[*]}" \
+        'BEGIN { n = split(names, arr, " "); for (i = 1; i <= n && i <= 10; i++) num[arr[i]] = i - 1 }
+         { mark = ($5 == "done" ? g "󰄬" o : $5 == "input" ? r "󰋗" o : " ")
+           printf "%s\t%s%s%s %s│%s %s%-*s%s %s│%s %s%-*s%s %s %s│%s %s%s%s\n", \
+             $1, g, ($2 in num ? num[$2] : " "), o, d, o, \
+             g, ws, $2, o, d, o, f, ww, $3, o, mark, d, o, s, $4, o }' <<<"$WINDOWS"
+}
+
+# One --bind per numbered session: pressing the digit switches and closes the popup.
+binds=()
+for i in "${!SESSIONS[@]}"; do
+  (( i < 10 )) || break
+  binds+=(--bind "$i:become(tmux switch-client -t '${SESSIONS[$i]}')")
+done
+
+target=$(
+  list | fzf "${binds[@]}" \
+    --no-input \
+    --bind 'j:down,k:up' \
+    --bind '/:show-input+unbind(j,k,/)' \
+    --bind 'esc:transform([[ $FZF_INPUT_STATE = enabled ]] && echo clear-query || echo abort)+hide-input+rebind(j,k,/)' \
+    --ansi \
+    --delimiter=$'\t' \
+    --with-nth=2 \
+    --reverse \
+    --cycle \
+    --border=none \
+    --info=inline \
+    --prompt='  ' \
+    --pointer='▸' \
+    --header="$(header)" \
+    --color='fg:#c5c9c5,bg:-1,hl:#ffa066,fg+:#c5c9c5,bg+:#282727,hl+:#ffa066' \
+    --color='info:#737c73,prompt:#98bb6c,pointer:#ffa066,border:#625e5a,header:#737c73' \
+    --preview='tmux capture-pane -ep -t {1}' \
+    --preview-window='down,60%,border-top' \
+  | cut -f1
+) || exit 0
+
+[[ -z "$target" ]] && exit 0
+
+tmux switch-client -t "${target%%:*}"
+tmux select-window -t "$target"

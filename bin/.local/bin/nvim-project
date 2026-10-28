@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# nvim-project: open nvim on the project in the current directory. Restores the
+# session last saved there (persistence.nvim, which LazyVim saves on quit, per
+# git branch), or opens the file explorer when there isn't one yet.
+#
+# tmux-start runs this as a window's own command rather than typing it into a
+# shell, so quitting nvim closes the window.
+exec nvim -c 'lua local p = require("persistence"); if vim.fn.filereadable(p.current()) == 1 or vim.fn.filereadable(p.current({ branch = false })) == 1 then p.load() else Snacks.explorer() end' "$@"

@@ -1,0 +1,18 @@
+#!/bin/bash
+# Opens each file given in nvim, in a new window of the tmux session you most recently used.
+# Called by ~/Applications/Open in Nvim.app, which macOS uses as the default app for dev file
+# types (set with duti), so clicking a file link in Ghostty lands here.
+# With no tmux client attached, it opens a new Ghostty window instead.
+TMUX_BIN=/opt/homebrew/bin/tmux
+NVIM_BIN=/opt/homebrew/bin/nvim
+
+session=$("$TMUX_BIN" list-clients -F '#{client_activity} #{client_session}' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+
+if [ -n "$session" ]; then
+    for file in "$@"; do
+        "$TMUX_BIN" new-window -t "$session:" -c "$(dirname "$file")" "$NVIM_BIN" "$file"
+    done
+    open -a Ghostty
+else
+    open -na Ghostty --args -e "$NVIM_BIN" "$@"
+fi

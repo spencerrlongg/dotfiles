@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# tmux-agent-notify: persistent tmux notifications for Claude Code and Codex.
+#
+# The agents' hooks call it, with the hook's JSON on stdin (ignored):
+#   tmux-agent-notify done <agent>    finished its turn     Claude Stop/StopFailure, Codex Stop
+#   tmux-agent-notify input <agent>   waiting on you        Claude Notification, Codex PermissionRequest
+#   tmux-agent-notify clear           you sent a prompt     UserPromptSubmit in both
+# Between a prompt and the stop, the window carries @agent_busy (the time the prompt
+# was sent), which tmux-status-anim shows as a spinner.
+# tmux calls it too (~/.tmux.conf):
+#   tmux-agent-notify seen <window> [client]   you switched to that window
+#   tmux-agent-notify status          every flagged window, oldest first, as a status segment
+#                                     (status-left now builds this from formats instead)
+#   tmux-agent-notify jump            go to the oldest flagged window (prefix + N)
+#
+# A notification is three window options: @agent_state (done or input), @agent_name
+# and @agent_at. It stays until you visit the window or send that agent a prompt, so
+# it survives switching sessions, detaching, and the screensaver. Nothing is flagged
+# when the window is already on screen. Every path exits 0 so a hook never fails.
+set -uo pipefail
+
+# Kanagawa Dragon, matching the status bar
+GREEN="#98bb6c"
+ORANGE="#ffa066"
+DIM="#737c73"
+
+# The pane the calling agent runs in. Hooks inherit TMUX_PANE from the agent; if an
+# agent strips its environment, walk up the process tree to a pane's shell instead.
+caller_pane() {
+  if [[ -n "${TMUX_PANE:-}" ]]; then
+    echo "$TMUX_PANE"
+    return 0
+  fi
+  local panes pid=$PPID hit
+  panes=$(tmux list-panes -a -F '#{pane_pid} #{pane_id}' 2>/dev/null) || return 1
+  while [[ -n "$pid" && "$pid" -gt 1 ]]; do
+    hit=$(awk -v p="$pid" '$1 == p { print $2 }' <<<"$panes")
+    if [[ -n "$hit" ]]; then
+      echo "$hit"
+      return 0
+    fi
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+  done
+  return 1
+}
+
+redraw() {
+  local client
+  tmux list-clients -F '#{client_name}' 2>/dev/null | while read -r client; do
+    tmux refresh-client -S -t "$client" 2>/dev/null
+  done
+}
+
+# Native notifications, written straight to each client's terminal rather than the
+# pane: tmux doesn't pass notification sequences through, and this reaches clients
+# on any session. Ghostty gets OSC 777, which it shows in Notification Center. Blink
+# gets a bell (mosh drops OSC 777 but keeps BEL), which it turns into an iOS
+# notification while in the background. A focused client already showing the window
+# is skipped; tmux tracks client focus whether or not focus-events is on.
+desktop_notify() {
+  local state="$1" agent="$2" win="$3" label title body tty term flags cwin
+  label=$(tmux display -p -t "$win" '#{session_name}:#{window_name}' 2>/dev/null)
+  title="$(tr '[:lower:]' '[:upper:]' <<<"${agent:0:1}")${agent:1}"
+  if [[ "$state" == input ]]; then body="Needs input in $label"; else body="Finished in $label"; fi
+  body=${body//;/,}
+  tmux list-clients -F '#{client_tty} #{client_termname} #{client_flags} #{window_id}' 2>/dev/null |
+    while read -r tty term flags cwin; do
+      [[ "$cwin" == "$win" && ",$flags," == *,focused,* && ",$flags," != *,suspended,* ]] && continue
+      [[ -w "$tty" ]] || continue
+      if [[ "$term" == xterm-ghostty ]]; then
+        printf '\e]777;notify;%s;%s\a' "$title" "$body" >"$tty"
+      else
+        printf '\a' >"$tty"
+      fi
+    done
+}
+
+mark() {
+  local state="$1" agent="${2:-agent}" pane win active attached
+  pane=$(caller_pane) || return 0
+  read -r win active attached < <(tmux display -p -t "$pane" '#{window_id} #{window_active} #{session_attached}' 2>/dev/null)
+  [[ -n "${win:-}" ]] || return 0
+  tmux set -wu -t "$win" @agent_busy 2>/dev/null  # the turn is over either way
+  desktop_notify "$state" "$agent" "$win"
+  # Already on screen: the window is current in a session a client is showing
+  [[ "$active" == 1 && "${attached:-0}" -gt 0 ]] && return 0
+  tmux set -w -t "$win" @agent_state "$state" \; \
+       set -w -t "$win" @agent_name "$agent" \; \
+       set -w -t "$win" @agent_at "$(date +%s)" 2>/dev/null
+  redraw
+}
+
+unflag() {
+  local win="$1"
+  [[ -n "$(tmux show -wv -t "$win" @agent_state 2>/dev/null)" ]] || return 0
+  tmux set -wu -t "$win" @agent_state \; set -wu -t "$win" @agent_name \; set -wu -t "$win" @agent_at 2>/dev/null
+  redraw
+}
+
+# Attaching fires client-session-changed, which would mark the window seen. But if
+# another client on the session is in the screensaver, the client-attached hook is
+# about to lock this one too, so nothing is on screen yet: keep the flag for the
+# screensaver to show (quitting it with qq marks the window seen).
+joining_screensaver() {
+  local client="$1" session created
+  read -r session created < <(tmux display -p -c "$client" '#{session_name} #{client_created}' 2>/dev/null)
+  [[ -n "${created:-}" ]] && (( $(date +%s) - created <= 2 )) || return 1
+  tmux list-clients -t "$session" -F '#{client_name} #{client_flags}' 2>/dev/null |
+    awk -v c="$client" '$1 != c && $2 ~ /suspended/ { found = 1 } END { exit !found }'
+}
+
+# Flagged windows, oldest first: at|state|session|window_id|window_name
+flagged() {
+  tmux list-windows -a -F '#{@agent_at}|#{@agent_state}|#{session_name}|#{window_id}|#{window_name}' 2>/dev/null |
+    awk -F'|' '$2 != ""' | sort -n
+}
+
+status() {
+  local list out="" at state session win name
+  list=$(flagged)
+  [[ -n "$list" ]] || return 0
+  while IFS='|' read -r at state session win name; do
+    if [[ "$state" == input ]]; then
+      out+="#[fg=$ORANGE]󰋗 $session:$name "
+    else
+      out+="#[fg=$GREEN]󰄬 $session:$name "
+    fi
+  done <<<"$list"
+  printf '#[fg=%s]󰂚 %s#[default]' "$DIM" "$out"
+}
+
+jump() {
+  local first session win
+  first=$(flagged | head -1)
+  if [[ -z "$first" ]]; then
+    tmux display-message "No agent notifications"
+    return 0
+  fi
+  session=$(cut -d'|' -f3 <<<"$first")
+  win=$(cut -d'|' -f4 <<<"$first")
+  tmux switch-client -t "=$session" \; select-window -t "$win"
+}
+
+case "${1:-}" in
+  done | input)
+    [[ -t 0 ]] || cat >/dev/null  # drain the hook JSON
+    mark "$1" "${2:-}"
+    ;;
+  clear)
+    [[ -t 0 ]] || cat >/dev/null
+    if pane=$(caller_pane); then
+      win=$(tmux display -p -t "$pane" '#{window_id}' 2>/dev/null)
+      tmux set -w -t "$win" @agent_busy "$(date +%s)" 2>/dev/null
+      unflag "$win"
+    fi
+    ;;
+  seen)
+    [[ -n "${2:-}" ]] || exit 0
+    [[ -n "${3:-}" ]] && joining_screensaver "$3" && exit 0
+    unflag "$2"
+    ;;
+  status) status ;;
+  jump) jump ;;
+esac
+exit 0

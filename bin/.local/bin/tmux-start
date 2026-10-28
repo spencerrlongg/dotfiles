@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# tmux-start — restore dev session layout
+# Sessions, in picker order: showcase, root-claude, snipe-mobile, servers, snipe-it
+# Created in that order so tmux's session ids ($0, $1, ...) follow it too.
+
+set -e
+
+if [[ -n "$TMUX" ]]; then
+  echo "Already inside a tmux session. Exiting."
+  exit 1
+fi
+
+# nvim windows run nvim-project as the window's own command (not typed into a
+# shell): it restores the project's last nvim session, and quitting nvim closes
+# the window
+NVIM_PROJECT="$HOME/.local/bin/nvim-project"
+
+# --- showcase (animations; also what prefix + V builds) ---
+~/.local/bin/tmux-showcase
+
+# --- root-claude ---
+tmux new-session -d -s root-claude -c /Users/spencer -n claude
+tmux send-keys  -t root-claude:0   'claude' Enter
+
+# --- snipe-mobile ---
+tmux new-session -d -s snipe-mobile -c /Users/spencer/dev/snipe-it-mobile -n claude
+tmux send-keys  -t snipe-mobile:0   'claude' Enter
+tmux new-window    -t snipe-mobile  -c /Users/spencer/dev/snipe-it-mobile  -n nvim "$NVIM_PROJECT"
+
+# --- servers ---
+tmux new-session -d -s servers    -c /Users/spencer/dev/snipe-it        -n ngrok
+tmux send-keys  -t servers:0      'ngrok start snipe-it' Enter
+tmux new-window    -t servers     -c /Users/spencer/dev/snipe-it-mobile  -n node
+tmux send-keys  -t servers:1      'EXPO_UNSTABLE_MCP_SERVER=1 npx expo start' Enter
+
+# --- snipe-it ---
+tmux new-session -d -s snipe-it   -c /Users/spencer/dev/snipe-it        -n claude
+tmux send-keys  -t snipe-it:0     'claude' Enter
+tmux new-window    -t snipe-it    -c /Users/spencer/dev/snipe-it         -n nvim "$NVIM_PROJECT"
+
+# Open on the showcase
+tmux attach -t showcase

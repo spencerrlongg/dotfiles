@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# tmux cheat sheet, the tmux counterpart of nvim's <leader>? popup. Bound to
+# prefix + ? in ~/.tmux.conf; runs inside display-popup, any key closes it.
+# Entries are the bindings this setup actually has: the custom ones from
+# ~/.tmux.conf plus the tmux, vi copy-mode, and tmux-yank defaults it keeps.
+
+# Kanagawa Dragon, matching tmux-session-menu and the status bar
+GREEN=$'\033[38;2;152;187;108m'   # #98bb6c  section titles
+ORANGE=$'\033[38;2;255;160;102m'  # #ffa066  keys
+FG=$'\033[38;2;197;201;197m'      # #c5c9c5  descriptions
+DIM=$'\033[38;2;98;94;90m'        # #625e5a  rules, notes
+BOLD=$'\033[1m'
+OFF=$'\033[0m'
+
+KEY_W=11   # key column width
+DESC_W=34  # description column width
+GAP="    "
+
+# "## Title" starts a section, "key | description" is a row, "" is a blank line.
+# The two columns are laid out side by side.
+LEFT='## Sessions
+j | Picker: every session and window
+Tab | Last session
+R S W A | Go to root-claude/servers/web/app
+( ) | Previous / next session
+s | Session tree
+$ | Rename session
+d | Detach
+
+## Windows
+c | New window
+n p | Next / previous window
+l | Last window
+0-9 | Go to window by number
+w | Pick from a list
+, | Rename window
+& | Close window
+
+## Other
+? | This cheat sheet
+/ | What does a key do?
+: | Command prompt
+C-a | Send C-a to the program
+I U | Install / update plugins (tpm)
+
+## In Showcase Panes (no prefix)
+q | Quit btop
+any key | Quit cbonsai, tty-clock, wave
+Up Enter | Restart one after it quits'
+
+RIGHT='## Panes
+% | Split left / right
+" | Split top / bottom
+arrows | Move to pane in that direction
+o | Next pane
+; | Last pane
+q | Show numbers, type one to jump
+z | Zoom pane (toggle)
+C-arrows | Resize (repeatable)
+Space | Next layout
+{ } | Swap pane back / forward
+! | Pane into its own window
+x | Close pane
+
+## Copy Mode (vi)
+[ | Enter copy mode (scrollback)
+v | Select characters (like vim visual)
+V | Select lines
+C-v | Select a block
+y | Copy to macOS clipboard
+Esc | Clear selection
+/ | Search down
+q | Leave copy mode
+] | Paste tmux buffer
+
+## Extras
+N | Jump to oldest agent notification
+V | Showcase session (animations)
+B | Screensaver (j/k switch, qq quit)
+v | Audio visualizer (q closes)
+a | Status animation (koi/petals/moon/bonsai)'
+
+# Render one column to fixed-width lines. Padding is computed on the plain text,
+# before the color codes go in, so the columns stay aligned.
+render() {
+  awk -F' [|] ' -v kw="$KEY_W" -v dw="$DESC_W" \
+      -v g="$GREEN" -v o="$ORANGE" -v f="$FG" -v d="$DIM" -v b="$BOLD" -v x="$OFF" '
+    function pad(s, n) { return s sprintf("%" (n - length(s) > 0 ? n - length(s) : 0) "s", "") }
+    /^## / {
+      t = substr($0, 4)
+      rule = ""; for (i = length(t) + 1; i < kw + dw + 1; i++) rule = rule "─"
+      printf "%s%s%s%s %s%s%s\n", b, g, t, x, d, rule, x; next
+    }
+    /^$/ { printf "%s\n", pad("", kw + dw + 1); next }
+    { printf "%s%s%s %s%s%s\n", o, pad($1, kw), x, f, pad(substr($2, 1, dw), dw), x }
+  ' <<<"$1"
+}
+
+blank=$(printf '%*s' "$((KEY_W + DESC_W + 1))" '')
+
+left=()
+while IFS= read -r l; do left+=("$l"); done < <(render "$LEFT")
+right=()
+while IFS= read -r l; do right+=("$l"); done < <(render "$RIGHT")
+rows=$((${#left[@]} > ${#right[@]} ? ${#left[@]} : ${#right[@]}))
+
+printf '\n'
+for ((i = 0; i < rows; i++)); do
+  printf '  %s%s%s\n' "${left[i]:-$blank}" "$GAP" "${right[i]:-}"
+done
+printf '\n  %sKeys follow the prefix, C-a, unless marked. Mouse: click a pane to focus, drag a border to resize.%s\n' "$DIM" "$OFF"
+printf '  %sAny key closes this.%s' "$DIM" "$OFF"
+
+read -rsn1

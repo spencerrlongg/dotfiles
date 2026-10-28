@@ -1,0 +1,527 @@
+#!/usr/bin/env python3
+"""kanagawa-wave: Hokusai's Great Wave off Kanagawa, animated in the terminal
+with the Kanagawa Dragon palette.
+
+  kanagawa-wave              quit with q, Esc, or Ctrl-C
+  kanagawa-wave -s           screensaver mode: any key quits
+  kanagawa-wave --fps 12     lower frame rate (less CPU)
+  kanagawa-wave --still 8    print the frame at t=8s and exit
+
+Each frame redraws only the cells that changed since the last one, plus a full
+redraw every 10 seconds so anything else that drew over it gets cleaned up. Inside a tmux
+pane it pauses while the pane isn't on screen (no client showing its window).
+"""
+
+import argparse
+import functools
+import math
+import os
+import random
+import select
+import signal
+import subprocess
+import sys
+import termios
+import time
+import tty
+
+PERIOD = 16.0  # seconds per big-wave cycle
+ASPECT = 2.0  # terminal cells are about twice as tall as wide
+FULL_REDRAW = 10.0  # seconds between frames that redraw every cell
+
+
+def rgb(h):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def mix(a, b, t):
+    return _mix(a, b, round(max(0.0, min(1.0, t)), 2))
+
+
+@functools.lru_cache(maxsize=8192)
+def _mix(a, b, t):
+    return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+
+
+def smoothstep(e0, e1, x):
+    t = max(0.0, min(1.0, (x - e0) / (e1 - e0)))
+    return t * t * (3 - 2 * t)
+
+
+# Kanagawa Dragon palette, from kanagawa.nvim's colors.lua
+INK = rgb("#0d0c0c")
+BLACK5 = rgb("#393836")
+BLACK6 = rgb("#625e5a")
+WAVE1 = rgb("#223249")
+WAVE2 = rgb("#2d4f67")
+BLUE = rgb("#658594")
+BLUE2 = rgb("#8ba4b0")
+WHITE = rgb("#c5c9c5")
+OLDWHITE = rgb("#c8c093")
+ASH = rgb("#737c73")
+GRAY = rgb("#a6a69c")
+RED = rgb("#c4746e")
+ORANGE = rgb("#b6927b")
+
+# Water background by depth (rows below the surface), lightest at the top
+DEPTH_BG = [
+    mix(mix(WAVE2, BLUE, 0.5), mix(WAVE1, INK, 0.3), smoothstep(0, 22, d))
+    for d in range(64)
+]
+FOAM = "o•°·."  # spray glyphs, from fresh to fading
+TITLE = "神奈川沖浪裏"  # "Under the Wave off Kanagawa"
+
+
+class Scene:
+    def __init__(self):
+        self.size = None
+        self.particles = []
+        self.cycle = -1
+        self.amp_scale = 1.0
+        self.rng = random.Random()
+        self.prev = None  # the last frame's cells, so the next draws only changes
+
+    def resize(self, w, h):
+        if self.size == (w, h):
+            return False
+        self.size = (w, h)
+        self.w, self.h = w, h
+        self.prev = None
+        self.horizon = h * 0.6
+        r = random.Random(7)
+        sky_rows = max(1, int(self.horizon) - 2)
+        self.stars = [
+            (r.randrange(w), r.randrange(sky_rows), r.random() * 6.28, 0.4 + r.random() * 2.2)
+            for _ in range(w * h // 90)
+        ]
+        self.clouds = [
+            (r.random(), 0.12 + r.random() * 0.3, 6 + r.random() * w * 0.12, 0.6 + r.random() * 1.2, 0.4 + r.random())
+            for _ in range(3)
+        ]
+        self.particles.clear()
+        return True
+
+    # --- geometry -------------------------------------------------------
+
+    def swell(self, t):
+        """Phase, crest x, height, and break progress of the big wave."""
+        u = (t % PERIOD) / PERIOD
+        cycle = int(t // PERIOD)
+        if cycle != self.cycle:
+            self.cycle = cycle
+            self.amp_scale = 0.82 + 0.22 * random.Random(cycle).random()
+        x = -0.25 * self.w + u * 1.3 * self.w
+        a = self.h * 0.44 * self.amp_scale * smoothstep(0.0, 0.48, u) * (1 - smoothstep(0.64, 0.9, u))
+        b = smoothstep(0.36, 0.62, u)
+        return u, x, a, b
+
+    def widths(self):
+        return max(4.0, self.w * 0.065), self.w * 0.2  # front, back
+
+    def base(self, x, t):
+        return (self.horizon
+                + 0.7 * math.sin(0.21 * x - 1.7 * t)
+                + 0.45 * math.sin(0.083 * x + 1.1 * t + 1.3)
+                + 0.25 * math.sin(0.37 * x - 2.9 * t))
+
+    def surface(self, x, t, sx, a):
+        """Surface row at column x, and how much of it belongs to the big wave (0..1)."""
+        sf, sb = self.widths()
+        d = x - sx
+        bump = math.exp(-(d / (sf if d > 0 else sb)) ** 2)
+        return self.base(x, t) - a * bump, bump
+
+    def lip(self, t, sx, a, b):
+        """The curling lip as (center x, center y, radius, start angle, end angle), or None."""
+        if a < self.h * 0.12:
+            return None
+        sf, _ = self.widths()
+        grow = min(1.0, a / (self.h * 0.3))
+        r = sf * 2.2 * (0.35 + 0.65 * b) * grow
+        if r < 2.5:
+            return None
+        top = self.base(sx, t) - a
+        cx = sx + r * 0.3
+        cy = top + r / ASPECT
+        return cx, cy, r, 105.0, 80.0 - 150.0 * b
+
+    # --- simulation -----------------------------------------------------
+
+    def step(self, t, dt):
+        u, sx, a, b = self.swell(t)
+        rng = self.rng
+        amax = self.h * 0.44
+        lip = self.lip(t, sx, a, b)
+        if lip:
+            cx, cy, r, _, end = lip
+            th = math.radians(end)
+            rr = r * 0.9
+            tip_x = cx + rr * math.cos(th)
+            tip_y = cy - rr * math.sin(th) / ASPECT
+            # Clockwise tangent at the tip, so spray is flung forward and down
+            tx, ty = math.sin(th), math.cos(th) / ASPECT
+            for _ in range(self._count(45 * b * a / amax, dt)):
+                speed = 10 + rng.random() * 14
+                self.particles.append([
+                    tip_x, tip_y,
+                    tx * speed + rng.uniform(-3, 3), ty * speed + rng.uniform(-4, 1),
+                    0.0, 0.7 + rng.random() * 1.0,
+                ])
+        if 0.58 < u < 0.92:
+            # The breaking crest throws spray along its whole front
+            sf, _ = self.widths()
+            for _ in range(self._count(70 * smoothstep(0.58, 0.7, u) * (1 - smoothstep(0.85, 0.92, u)), dt)):
+                x = sx + rng.uniform(-sf, sf * 2.5)
+                y, _ = self.surface(x, t, sx, a)
+                self.particles.append([
+                    x, y - rng.random(),
+                    rng.uniform(3, 14), -rng.uniform(2, 9),
+                    0.0, 0.6 + rng.random() * 1.2,
+                ])
+        alive = []
+        for p in self.particles:
+            p[0] += p[2] * dt
+            p[1] += p[3] * dt
+            p[3] += 16 * dt  # gravity, rows/s^2
+            p[4] += dt
+            if p[4] < p[5] and -2 < p[0] < self.w + 2 and p[1] < self.h:
+                surf, _ = self.surface(p[0], t, sx, a)
+                if p[1] < surf + 1.5:
+                    alive.append(p)
+        self.particles = alive[-900:]
+
+    def _count(self, rate, dt):
+        n = rate * dt
+        return int(n) + (1 if self.rng.random() < n - int(n) else 0)
+
+    # --- drawing --------------------------------------------------------
+
+    def render(self, t):
+        w, h = self.w, self.h
+        ch = [[" "] * w for _ in range(h)]
+        fg = [[None] * w for _ in range(h)]
+        bg = [[None] * w for _ in range(h)]
+
+        def put(x, y, c, f=None, b=None):
+            if 0 <= x < w and 0 <= y < h:
+                ch[y][x] = c
+                if f is not None:
+                    fg[y][x] = f
+                if b is not None:
+                    bg[y][x] = b
+
+        self._sky(t, put)
+        self._sun_and_clouds(t, put, ch, bg)
+        self._fuji(put)
+        u, sx, a, b = self.swell(t)
+        surf = self._sea(t, sx, a, put, bg)
+        self._boats(t, surf, put)
+        self._lip(t, sx, a, b, put)
+        for x, y, _, _, age, life in self.particles:
+            f = age / life
+            put(int(x), int(y), FOAM[min(len(FOAM) - 1, int(f * len(FOAM)))], mix(WHITE, ASH, f))
+        self._cartouche(put, ch)
+        return self._emit(ch, fg, bg)
+
+    def _sky(self, t, put):
+        for x, y, phase, speed in self.stars:
+            v = 0.5 + 0.5 * math.sin(t * speed + phase)
+            c = "." if v < 0.45 else "·" if v < 0.8 else "+" if v < 0.95 else "*"
+            put(x, y, c, mix(BLACK5, GRAY, v))
+
+    def _sun_and_clouds(self, t, put, ch, bg):
+        w, h = self.w, self.h
+        sx, sy = w * 0.8, h * 0.2
+        r = max(2.5, min(w, h * ASPECT) * 0.07)
+        for y in range(int(sy - r / ASPECT) - 1, int(sy + r / ASPECT) + 2):
+            for x in range(int(sx - r) - 1, int(sx + r) + 2):
+                top = math.hypot(x + 0.5 - sx, (y + 0.25 - sy) * ASPECT) < r
+                bottom = math.hypot(x + 0.5 - sx, (y + 0.75 - sy) * ASPECT) < r
+                if top and bottom:
+                    put(x, y, " ", None, RED)
+                elif top:
+                    put(x, y, "▀", RED)
+                elif bottom:
+                    put(x, y, "▄", RED)
+        for x0, yf, length, speed, thick in self.clouds:
+            span = w + 2 * length
+            cx = (x0 * span + t * speed) % span - length
+            cy = yf * h
+            for y in range(int(cy - thick) - 1, int(cy + thick) + 2):
+                for x in range(int(cx - length), int(cx + length) + 1):
+                    e = ((x - cx) / length) ** 2 + ((y - cy) / (thick + 0.6)) ** 2
+                    if e < 1 and 0 <= x < w and 0 <= y < h:
+                        # Dashed bands, like the print's streaked clouds
+                        if (x + y * 3) % 5:
+                            put(x, y, "─", mix(GRAY, BLACK6, e))
+
+    def _fuji(self, put):
+        w, h = self.w, self.h
+        fx = int(w * 0.6)
+        base = int(self.horizon) + 1
+        peak = int(self.horizon - max(3.0, h * 0.17))
+        snow_line = peak + (base - peak) * 0.42
+        body = mix(BLACK5, WAVE1, 0.55)
+        snow = mix(GRAY, BLACK6, 0.15)
+        for y in range(peak, base + 1):
+            half = (y - peak) * 2 + 2  # two columns per row reads as 45 degrees
+            left, right = fx - half, fx + half
+            for x in range(left, right + 1):
+                streak = 1.4 * math.sin(x * 0.8) + 0.8 * math.sin(x * 2.1 + 1)
+                col = snow if y < snow_line + streak else body
+                if x == left:
+                    put(x, y, "▗", col)
+                elif x == left + 1:
+                    put(x, y, "▟", col)
+                elif x == right - 1:
+                    put(x, y, "▙", col)
+                elif x == right:
+                    put(x, y, "▖", col)
+                else:
+                    put(x, y, " ", None, col)
+
+    def _sea(self, t, sx, a, put, bg):
+        w, h = self.w, self.h
+        surf = []
+        for x in range(w):
+            s, bump = self.surface(x + 0.5, t, sx, a)
+            s2, _ = self.surface(x + 1.5, t, sx, a)
+            surf.append(s)
+            slope = abs(s2 - s)
+            crest = bump * a / (h * 0.44)
+            wobble = 0.8 * math.sin(x * 0.07 - t * 0.9)
+            top = int(math.floor(s))
+            frac = s - top
+            if frac > 0.5 and 0 <= top < h:
+                # Water fills only the lower half of this cell
+                put(x, top, "▄", DEPTH_BG[0])
+            for y in range(max(0, top + (1 if frac > 0.5 else 0)), h):
+                depth = y + 0.5 - s
+                d = DEPTH_BG[min(63, max(0, int(depth)))]
+                if depth < 1.0:
+                    foam = max(0.0, min(1.0, crest * 1.6 + slope * 0.9 - 0.25))
+                    put(x, y, "≈" if foam > 0.55 else "~", mix(BLUE2, WHITE, foam), d)
+                    continue
+                band = depth * 0.75 + wobble + crest * 3
+                fb = band - math.floor(band)
+                if fb < 0.3 and (x * 3 + int(band) * 5) % 13 < 9:
+                    light = max(0.0, 0.55 - depth * 0.03) + crest * 0.5
+                    put(x, y, "~", mix(mix(BLUE, d, 0.3), WHITE, light), d)
+                else:
+                    put(x, y, " ", None, d)
+        return surf
+
+    def _boats(self, t, surf, put):
+        w = self.w
+        hull = "\\______/"
+        for i, offset in enumerate((0.15, 0.55)):
+            span = w + 20
+            bx = int((offset * span - t * (1.2 + i * 0.5)) % span) - 10
+            mid = bx + len(hull) // 2
+            if not 0 <= mid < w:
+                continue
+            y = int(surf[mid]) - 1
+            for k, c in enumerate(hull):
+                put(bx + k, y, c, ORANGE)
+            for k in (2, 4, 6):
+                put(bx + k - 1, y - 1, "o", mix(OLDWHITE, BLACK6, 0.3))
+
+    def _lip(self, t, sx, a, b, put):
+        lip = self.lip(t, sx, a, b)
+        if not lip:
+            return
+        cx, cy, r, start, end = lip
+        for y in range(int(cy - r / ASPECT) - 1, int(cy + r / ASPECT) + 2):
+            for x in range(int(cx - r) - 1, int(cx + r) + 2):
+                dx = x + 0.5 - cx
+                dy = (y + 0.5 - cy) * ASPECT
+                d = math.hypot(dx, dy)
+                ang = math.degrees(math.atan2(-dy, dx))
+                if not (end <= ang <= start) or d > r:
+                    continue
+                along = (start - ang) / (start - end)
+                inner = r * (1 - 0.6 * (1 - along * 0.75))
+                if d < inner:
+                    continue
+                depth = (r - d) / (r - inner)  # 0 at the outer edge
+                if depth < 0.3 or along > 0.85:
+                    c = "•" if along > 0.92 else "≈" if (x + y) % 3 else "o"
+                    put(x, y, c, mix(BLUE2, WHITE, 0.6 + along * 0.4), DEPTH_BG[1])
+                elif (int(d * 1.4) % 2) == 0:
+                    put(x, y, "~", mix(BLUE, WHITE, 0.25 + along * 0.4), DEPTH_BG[int(2 + depth * 6)])
+                else:
+                    put(x, y, " ", None, DEPTH_BG[int(2 + depth * 6)])
+
+    def _cartouche(self, put, ch):
+        """Vertical title box in the top-left corner, as on the print."""
+        if self.h < len(TITLE) + 4 or self.w < 30:
+            return
+        col = mix(OLDWHITE, BLACK6, 0.35)
+        x, y = 2, 1
+        put(x, y, "┌", col); put(x + 1, y, "─", col); put(x + 2, y, "─", col); put(x + 3, y, "┐", col)
+        for i, glyph in enumerate(TITLE):
+            row = y + 1 + i
+            put(x, row, "│", col)
+            put(x + 1, row, glyph, col, None)
+            ch[row][x + 2] = ""  # the glyph is two cells wide
+            put(x + 3, row, "│", col)
+        row = y + 1 + len(TITLE)
+        put(x, row, "└", col); put(x + 1, row, "─", col); put(x + 2, row, "─", col); put(x + 3, row, "┘", col)
+
+    def _emit(self, ch, fg, bg):
+        """Escape codes for the frame: every row the first time (or after a resize),
+        then only the runs of cells that differ from the previous frame."""
+        grid = [list(zip(ch[y], fg[y], bg[y])) for y in range(self.h)]
+        prev, self.prev = self.prev, grid
+        out = ["\x1b[?2026h"]
+        cur = None  # colors the terminal currently has set; they survive cursor moves
+        for y, row in enumerate(grid):
+            if prev is None:
+                runs = [(0, self.w)]
+                cur = None  # --still turns each row start into a reset and newline
+            elif row == prev[y]:
+                continue
+            else:
+                runs = changed_runs(row, prev[y])
+            for start, end in runs:
+                out.append(f"\x1b[{y + 1};{start + 1}H")
+                for c, f, b in row[start:end]:
+                    if (f, b) != cur:
+                        out.append(sgr(cur, f, b))
+                        cur = (f, b)
+                    out.append(c)
+        out.append("\x1b[0m\x1b[?2026l")
+        return "".join(out)
+
+
+def sgr(cur, f, b):
+    """Escape code to go from colors `cur` to (f, b), sending only the one that
+    changed. Most of the output is 24-bit color codes, so this halves a lot of it."""
+    if cur is None:
+        return ("\x1b[0"
+                + (f";38;2;{f[0]};{f[1]};{f[2]}" if f else "")
+                + (f";48;2;{b[0]};{b[1]};{b[2]}" if b else "")
+                + "m")
+    parts = []
+    if f != cur[0]:
+        parts.append(f"38;2;{f[0]};{f[1]};{f[2]}" if f else "39")
+    if b != cur[1]:
+        parts.append(f"48;2;{b[0]};{b[1]};{b[2]}" if b else "49")
+    return "\x1b[" + ";".join(parts) + "m"
+
+
+def changed_runs(row, old, gap=2):
+    """(start, end) column ranges covering the cells that changed. Runs closer than
+    `gap` cells are joined, since moving the cursor costs about as much as redrawing
+    a few cells. A run never starts on the right half of a wide glyph."""
+    runs = []
+    for x, (a, b) in enumerate(zip(row, old)):
+        if a == b:
+            continue
+        if x > 0 and row[x][0] == "":
+            x -= 1
+        if runs and x - runs[-1][1] < gap:
+            runs[-1][1] = max(runs[-1][1], x + 1)
+        else:
+            runs.append([x, x + 1])
+    return runs
+
+
+def pane_visible(pane):
+    """Whether a client is showing this tmux pane's window. A client in the tmux
+    screensaver doesn't count; tmux leaves it out of session_attached."""
+    try:
+        out = subprocess.run(["tmux", "display", "-p", "-t", pane, "#{session_attached} #{window_active}"],
+                             capture_output=True, text=True, timeout=2).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return len(out) != 2 or (out[0] != "0" and out[1] == "1")
+
+
+def still(t, fps):
+    w, h = os.get_terminal_size() if sys.stdout.isatty() else (int(os.environ.get("COLUMNS", 100)), int(os.environ.get("LINES", 32)))
+    scene = Scene()
+    scene.rng.seed(1)
+    scene.resize(w, h)
+    dt = 1.0 / fps
+    k = 0.0
+    while k < t:
+        scene.step(k, dt)
+        k += dt
+    frame = scene.render(t)
+    # Positioning escapes only make sense on a live screen; use newlines instead
+    import re
+    frame = re.sub(r"\x1b\[(\d+);1H", lambda m: "" if m.group(1) == "1" else "\x1b[0m\n", frame)
+    sys.stdout.write(frame.replace("\x1b[?2026h", "").replace("\x1b[?2026l", "") + "\n")
+
+
+def run(screensaver, fps):
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    signal.signal(signal.SIGHUP, lambda *_: sys.exit(0))
+    out = sys.stdout
+    out.write("\x1b[?1049h\x1b[?25l\x1b[2J")
+    tty.setcbreak(fd)
+    scene = Scene()
+    frame_time = 1.0 / fps
+    start = time.monotonic() - PERIOD * 0.2  # open with the swell already rising
+    last = time.monotonic()
+    pane = os.environ.get("TMUX_PANE")
+    visible, next_check = True, 0.0
+    next_full = time.monotonic() + FULL_REDRAW
+    try:
+        while True:
+            now = time.monotonic()
+            if pane and now >= next_check:
+                next_check = now + 2.0
+                shown = pane_visible(pane)
+                if shown and not visible:
+                    scene.prev = None  # redraw everything on return
+                visible = shown
+            if not visible:
+                last = now
+                if select.select([fd], [], [], 1.0)[0]:
+                    keys = os.read(fd, 64)
+                    if screensaver or any(k in keys for k in b"qQ\x1b"):
+                        break
+                continue
+            w, h = os.get_terminal_size()
+            if scene.resize(w, h):
+                out.write("\x1b[0m\x1b[2J")
+            if now >= next_full:
+                scene.prev = None
+                next_full = now + FULL_REDRAW
+            scene.step(now - start, min(0.1, now - last))
+            last = now
+            out.write(scene.render(now - start))
+            out.flush()
+            wait = max(0.0, frame_time - (time.monotonic() - now))
+            ready, _, _ = select.select([fd], [], [], wait)
+            if ready:
+                keys = os.read(fd, 64)
+                if screensaver or any(k in keys for k in b"qQ\x1b"):
+                    break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        out.write("\x1b[0m\x1b[?25h\x1b[?1049l")
+        out.flush()
+
+
+def main():
+    p = argparse.ArgumentParser(description="The Great Wave off Kanagawa, animated.")
+    p.add_argument("-s", "--screensaver", action="store_true", help="quit on any key")
+    p.add_argument("--fps", type=int, default=20)
+    p.add_argument("--still", type=float, metavar="SECONDS", help="print one frame and exit")
+    args = p.parse_args()
+    if args.still is not None:
+        still(args.still, args.fps)
+    else:
+        run(args.screensaver, max(1, args.fps))
+
+
+if __name__ == "__main__":
+    main()

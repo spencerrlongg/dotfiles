@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# wifi-ethernet-toggle: Wi-Fi off while ethernet is connected, back on when it isn't.
+#
+# With both up, the Mac has two addresses on the same LAN (one per interface) and
+# replies can leave on a different interface than the request came in on. mosh
+# sessions from the iPad dropped and restarted every few minutes like that.
+#
+# Run by the LaunchAgent ~/Library/LaunchAgents/com.spencer.wifi-ethernet-toggle.plist
+# on every network configuration change, plus every 15s as a fallback.
+#   wifi-ethernet-toggle            check and switch
+#   wifi-ethernet-toggle --dry-run  print what it would do
+#
+# Wi-Fi only comes back on if this script turned it off (a state file records that),
+# so turning Wi-Fi off by hand without ethernet sticks.
+set -uo pipefail
+
+PATH=/usr/sbin:/usr/bin:/bin:/sbin
+STATE="$HOME/.local/state/wifi-ethernet-toggle/disabled-wifi"
+LOG="$HOME/Library/Logs/wifi-ethernet-toggle.log"
+DRY_RUN=0
+[[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
+
+log() {
+  if ((DRY_RUN)); then
+    echo "$*"
+  else
+    echo "$(date '+%F %T') $*" >>"$LOG"
+  fi
+}
+
+notify() {
+  ((DRY_RUN)) || osascript -e "display notification \"$1\" with title \"Network\"" >/dev/null 2>&1
+}
+
+# Device names of the hardware ports whose name says LAN or Ethernet, and the Wi-Fi one.
+ports=$(networksetup -listallhardwareports)
+wifi_dev=$(awk '/^Hardware Port: Wi-Fi/{getline; print $2}' <<<"$ports")
+wired_devs=$(awk '/^Hardware Port: .*(LAN|Ethernet)/{getline; print $2}' <<<"$ports")
+[[ -z "$wifi_dev" ]] && exit 0
+
+# A wired interface counts once it has a link and a DHCP or static address. The
+# "Ethernet Adapter (en4-6)" ports macOS lists never get one, and a self-assigned
+# 169.254 address means DHCP failed, so Wi-Fi stays on in both cases.
+wired=""
+for dev in $wired_devs; do
+  ifconfig "$dev" 2>/dev/null | grep -q 'status: active' || continue
+  ip=$(ipconfig getifaddr "$dev" 2>/dev/null) || continue
+  [[ -n "$ip" && "$ip" != 169.254.* ]] && wired="$dev ($ip)" && break
+done
+
+wifi_on=0
+networksetup -getairportpower "$wifi_dev" | grep -q ': On$' && wifi_on=1
+
+if [[ -n "$wired" ]]; then
+  if ((wifi_on)); then
+    log "ethernet up on $wired, turning Wi-Fi off"
+    if ((!DRY_RUN)); then
+      mkdir -p "$(dirname "$STATE")"
+      networksetup -setairportpower "$wifi_dev" off && touch "$STATE"
+      notify "Ethernet connected, Wi-Fi off"
+    fi
+  else
+    ((DRY_RUN)) && echo "ethernet up on $wired, Wi-Fi already off"
+  fi
+elif [[ -f "$STATE" ]]; then
+  log "no ethernet, turning Wi-Fi back on"
+  if ((!DRY_RUN)); then
+    networksetup -setairportpower "$wifi_dev" on && rm -f "$STATE"
+    notify "Ethernet disconnected, Wi-Fi on"
+  fi
+else
+  ((DRY_RUN)) && echo "no ethernet, Wi-Fi left as is (on=$wifi_on)"
+fi
+exit 0
