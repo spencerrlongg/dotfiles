@@ -355,7 +355,10 @@ return {
             ignored = true,
             -- The sidebar preset defaults to 40 columns with min_width 40, so
             -- min_width has to drop too or the width setting is clamped back up.
-            layout = { layout = { width = 32, min_width = 32 } },
+            -- No filter box on top: file search is <leader><leader>, and with the
+            -- box there, keys like `a` went to it instead of the file list.
+            -- `/` still brings it back when a filter is wanted.
+            layout = { hidden = { "input" }, layout = { width = 32, min_width = 32 } },
           },
           files = {
             hidden = true,
