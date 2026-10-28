@@ -1,0 +1,4 @@
+# Base markdownlint config for nvim-lint (passed via --config in lua/plugins/custom.lua).
+# A project's own .markdownlint* file still overrides these.
+config:
+  MD013: false # line-length
