@@ -1,0 +1,6 @@
+# Husky 8 sources this before every hook in every husky repo (husky.sh sets
+# $hook_name). Husky repos set their own core.hooksPath, so the global
+# ~/.config/git/hooks never runs there; this adds its secret scan.
+if [ "$hook_name" = pre-commit ]; then
+  "$HOME/.config/git/secret-scan" || exit 1
+fi

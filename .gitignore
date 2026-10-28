@@ -11,6 +11,7 @@
 !/bin/
 !/tmux/
 !/zsh/
+!/git/
 
 # Never tracked, even inside an un-ignored package. These come last so no
 # package line above can re-include them (the last matching rule wins).

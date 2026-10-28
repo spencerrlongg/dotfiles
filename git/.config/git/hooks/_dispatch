@@ -1,0 +1,19 @@
+#!/bin/sh
+# Global git hooks, enabled by core.hooksPath in ~/.gitconfig. A global hooksPath
+# makes git stop looking in each repo's .git/hooks, so every client hook name in
+# this folder links here: run anything global for that hook, then hand off to the
+# repo's own hook of the same name, if it has one.
+#
+# reference-transaction and post-index-change aren't linked; they fire on nearly
+# every git command, and nothing here needs them.
+
+name=$(basename "$0")
+
+if [ "$name" = pre-commit ]; then
+  "$HOME/.config/git/secret-scan" || exit 1
+fi
+
+repo_hook="$(git rev-parse --git-common-dir)/hooks/$name"
+if [ -x "$repo_hook" ]; then
+  exec "$repo_hook" "$@"
+fi
