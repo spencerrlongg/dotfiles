@@ -6,6 +6,7 @@
 !/.gitleaks.toml
 !/README.md
 !/hooks/
+!/ghostty/
 
 # Never tracked, even inside an un-ignored package. These come last so no
 # package line above can re-include them (the last matching rule wins).

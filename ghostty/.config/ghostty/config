@@ -1,0 +1,9 @@
+font-family = JetBrains Mono Nerd Font
+
+background-opacity = 0.97
+# Light blur (true = 20). macOS re-blurs behind the window on every frame Ghostty
+# draws, so lower is a little cheaper and false skips it entirely
+background-blur = 5
+
+# Kanagawa Dragon, matching Neovim, tmux, btop, and the 16-color terminal apps
+theme = Kanagawa Dragon
