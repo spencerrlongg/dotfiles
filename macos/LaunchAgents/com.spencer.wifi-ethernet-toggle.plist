@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Runs ~/.local/bin/wifi-ethernet-toggle: Wi-Fi off while ethernet is connected. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.spencer.wifi-ethernet-toggle</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/spencer/.local/bin/wifi-ethernet-toggle</string>
+  </array>
+  <!-- configd rewrites these whenever an interface comes up, goes down or changes address -->
+  <key>WatchPaths</key>
+  <array>
+    <string>/Library/Preferences/SystemConfiguration</string>
+    <string>/private/var/run/resolv.conf</string>
+  </array>
+  <!-- Fallback in case a change doesn't touch either path -->
+  <key>StartInterval</key>
+  <integer>15</integer>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>
