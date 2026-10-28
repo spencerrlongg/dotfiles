@@ -1,0 +1,33 @@
+; cava config: system audio via a Core Audio tap, Kanagawa Dragon colors.
+; Used by prefix + v (popup) and the tmux screensaver rotation.
+; The tap needs tmux allowed under System Settings > Privacy & Security >
+; Screen & System Audio Recording > "System Audio Recording Only".
+
+[general]
+framerate = 60
+bar_width = 2
+bar_spacing = 1
+; idle CPU: sleep after this many seconds of silence
+sleep_timer = 5
+
+[input]
+method = coreaudio
+source = tap
+
+[output]
+method = noncurses
+channels = stereo
+
+[color]
+background = default
+gradient = 1
+gradient_color_1 = '#658594'
+gradient_color_2 = '#8ba4b0'
+gradient_color_3 = '#8ea4a2'
+gradient_color_4 = '#87a987'
+gradient_color_5 = '#c4b28a'
+gradient_color_6 = '#b6927b'
+gradient_color_7 = '#c4746e'
+
+[smoothing]
+noise_reduction = 77
