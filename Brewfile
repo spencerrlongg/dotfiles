@@ -49,12 +49,12 @@ brew "rbenv"
 brew "anomalyco/tap/opencode"
 cask "herd"          # PHP, Composer, nginx for Laravel sites
 cask "phpstorm"
-cask "jetbrains-toolbox"
+# cask "jetbrains-toolbox"
 cask "android-studio"
 cask "zulu@17"       # JDK for Android builds
-cask "expo-orbit"
+# cask "expo-orbit"
 cask "tableplus"
-cask "charles"
+# cask "charles"
 cask "requestly"
 cask "ngrok"
 cask "gitbutler"
@@ -73,25 +73,25 @@ cask "nikitabobko/tap/aerospace"
 cask "thaw@beta"     # menu bar manager; Thaw 3 beta is the macOS 27 build (`thaw` is 26 only)
 cask "raycast"
 cask "aldente"
-cask "soundsource"
+# cask "soundsource" not using this rn 
 cask "reflector"
 cask "grandperspective"
-cask "logi-options+"
+# cask "logi-options+"
 cask "focusrite-control"
 cask "clamxav"
-cask "private-internet-access"
+# cask "private-internet-access"
 # cask "jordanbaird-ice"     # replaced by Thaw
 # cask "bartender"           # replaced by Thaw
 
 # --- Apps ------------------------------------------------------------------------------
 cask "obsidian"
 cask "notion"
-cask "hey-desktop"
+# cask "hey-desktop"
 cask "discord"
 cask "zoom"
 cask "google-chrome"
 cask "firefox"
-cask "inkscape"
+# cask "inkscape"
 cask "copilot-money"
 cask "steam"
 
