@@ -167,7 +167,7 @@ step_checklist() {
   say "Still to do by hand"
   cat <<'EOF'
   - Sign in: App Store, iCloud, 1Password, Raycast (turn on cloud sync), JetBrains
-    (Settings Sync), Slack, Notion, HEY, Discord, Tailscale
+    (Settings Sync), Slack, Notion, Discord, Tailscale
   - Claude Code: claude, then /login. Plugins come back from enabledPlugins in settings.json
   - Codex: codex login, then /hooks to trust the hooks again (trust is per hook hash)
   - atuin: atuin login, using the key saved from the old Mac (~/.local/share/atuin/key)
