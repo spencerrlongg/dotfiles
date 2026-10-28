@@ -5,8 +5,31 @@ scripts (tmux screensaver, status animation, agent notifications, session launch
 Managed with [GNU Stow](https://www.gnu.org/software/stow/). Claude Code and Codex
 config live in a separate private repo.
 
-Status: every package below is moved in and stowed on the current Mac. No
-`bootstrap.sh` or Brewfile yet.
+## New Mac
+
+```sh
+git clone https://github.com/spencerrlongg/dotfiles ~/dotfiles
+~/dotfiles/bootstrap.sh
+```
+
+`bootstrap.sh` runs these steps in order; name some to run only those
+(`bootstrap.sh link tmux`), and any step can be re-run:
+
+| Step | Does |
+|---|---|
+| `xcode` | Xcode command line tools |
+| `brew` | Homebrew |
+| `repos` | signs in to `gh`, clones the private repo, turns on the secret-scan hook in both |
+| `bundle` | everything in `Brewfile`, including Mac App Store apps |
+| `tools` | oh-my-zsh, nvm + Node + global npm packages, atuin, bun, Claude Code |
+| `link` | stows every package from both repos; files in the way go to `~/.dotfiles-backup/<time>/` |
+| `tmux` | TPM and the plugins in `.tmux.conf` |
+| `macos` | Open in Nvim.app + file associations, LaunchAgents |
+| `checklist` | prints what still needs doing by hand (sign-ins, permissions) |
+
+`tools` runs before `link` on purpose: those installers append to `~/.zshrc` and
+friends, and `link` then sets their versions aside for the repo's, which already
+have the lines they need.
 
 | Package | What it links |
 |---|---|
