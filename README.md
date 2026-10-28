@@ -1,12 +1,12 @@
 # dotfiles
 
-Config for Spencer's Mac: zsh, tmux, Neovim, Ghostty, the `~/.local/bin` scripts
-(screensaver, status animation, agent notifications, session launcher), and the
-Claude Code / Codex setup. Managed with [GNU Stow](https://www.gnu.org/software/stow/).
+Config for Spencer's Mac: zsh, tmux, Neovim, Ghostty, AeroSpace, and the `~/.local/bin`
+scripts (tmux screensaver, status animation, agent notifications, session launcher).
+Managed with [GNU Stow](https://www.gnu.org/software/stow/). Claude Code and Codex
+config live in a separate private repo.
 
 Status: every package below is moved in and stowed on the current Mac. No
-`bootstrap.sh` or Brewfile yet; see the plan in Obsidian at
-`Personal/Plans/2026-08-13-Dotfiles-Repo-Setup.md`.
+`bootstrap.sh` or Brewfile yet.
 
 | Package | What it links |
 |---|---|
@@ -18,14 +18,19 @@ Status: every package below is moved in and stowed on the current Mac. No
 | `term` | cava, btop and fastfetch configs |
 | `aerospace` | `.aerospace.toml` |
 | `bin` | `~/.local/bin` scripts (tmux screensaver, status animation, agent notify, ...) |
-| `claude` | `~/.claude` config: CLAUDE.md, settings, statusline, hooks, own skills |
-| `codex` | `~/.codex` config: config.toml, hooks.json, AGENTS.md |
-| `memory` | Claude memory folders and `~/.codex/user-memory` (see below) |
 | `misc` | jj config, `.yarnrc`, PhpStorm code style |
+
+Not Stow packages:
+
+| Folder | What it is |
+|---|---|
+| `macos/open-in-nvim/` | Builds `~/Applications/Open in Nvim.app`, a droplet that opens files in nvim in a new tmux window, and makes it the default app for the extensions in `extensions` (`install.sh`, needs `duti`) |
+| `macos/LaunchAgents/` | `wifi-ethernet-toggle` agent: Wi-Fi off while ethernet is connected. `install.sh` copies and loads it |
+| `blink/` | Kanagawa Dragon theme for Blink Shell on the iPad, with a pure black background. The live copy is in iCloud Drive under `Blink/` |
 
 ## Layout
 
-Each top-level folder is a Stow package whose contents mirror their path under `~`:
+Each top-level package folder mirrors its path under `~`:
 `nvim/.config/nvim/` is linked to `~/.config/nvim/`.
 
 ## Using it
@@ -38,13 +43,8 @@ stow --no-folding nvim            # link one package into ~
 ```
 
 Always pass `--no-folding`. Without it, Stow links a whole folder (say
-`~/.local/bin` or `~/.claude`) into the repo when that folder doesn't exist yet,
-and anything a tool later writes there lands inside the repo.
-
-The one exception is `memory`, stowed with plain `stow memory`: each memory folder
-is linked whole, so memories Claude and Codex write later land in the repo. Create
-`~/.claude/projects/<project>/` for each project and `~/.codex/` first, or Stow
-links a folder one level higher and session transcripts end up in the repo.
+`~/.local/bin`) into the repo when that folder doesn't exist yet, and anything a
+tool later writes there lands inside the repo.
 
 Stow skips `.gitignore` files, so `nvim`'s own `.gitignore` stays in the repo only.
 
