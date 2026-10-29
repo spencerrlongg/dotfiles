@@ -175,6 +175,10 @@ step_checklist() {
     System Audio Recording Only: add Ghostty. Quit Ghostty fully, relaunch, restart the
     tmux server. Without it cava never runs.
   - AeroSpace and Thaw: grant Accessibility when asked
+  - Battery: set AlDente's charge limit to 80% (it's in the Brewfile). Use Top Up
+    before days away from the desk. When 80% stops lasting the day, raise it to
+    85-90% instead of going back to 100%. Alternative without AlDente: System
+    Settings > Battery > Charge Limit (built in since macOS 27, but no top-up button)
   - macOS screen saver delay must stay above tmux lock-after-time (210 s)
   - Herd: open it once (installs PHP, writes its PATH lines to ~/.zshrc, which is a
     link into ~/dotfiles: check git diff there afterwards)
