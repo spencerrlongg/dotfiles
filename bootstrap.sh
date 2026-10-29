@@ -178,7 +178,7 @@ step_checklist() {
   - Battery: set AlDente's charge limit to 80% (it's in the Brewfile). Use Top Up
     before days away from the desk. When 80% stops lasting the day, raise it to
     85-90% instead of going back to 100%. Alternative without AlDente: System
-    Settings > Battery > Charge Limit (built in since macOS 27, but no top-up button)
+    Settings > Battery > Charge Limit (built in since macOS 27)
   - macOS screen saver delay must stay above tmux lock-after-time (210 s)
   - Herd: open it once (installs PHP, writes its PATH lines to ~/.zshrc, which is a
     link into ~/dotfiles: check git diff there afterwards)
