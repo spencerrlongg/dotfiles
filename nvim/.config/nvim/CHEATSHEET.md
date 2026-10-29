@@ -98,6 +98,19 @@ bufferline. `:tabclose` refuses on the last tabpage. For a Diffview tab, use
 | `r` | (in the unpushed panel) Refresh — reloads the commit list in place after a commit, amend, rebase or push; the current diff stays open while it loads |
 | `:ReviewMarksClear` | Drop every review mark for the current repo |
 
+Moving through changes (diffview and vim defaults, work from either diff pane):
+
+| Key | Action |
+|---|---|
+| `]c` / `[c` | Next / prev change (hunk) in the current file's diff |
+| `<Tab>` / `<S-Tab>` | Next / prev file's diff (also works from the file panel) |
+| `[F` / `]F` | First / last file |
+| `]x` / `[x` | Next / prev merge conflict (merge tool only) |
+| `<leader>e` | Focus the file panel (`<leader>b` toggles it) |
+
+`]c` doesn't wrap: at the last change in a file it stops, so `<Tab>` to the next file.
+Outside a diff, `]c` is LazyVim's "next class"; it only means "next change" in diff mode.
+
 Diffview opens in its own tabpage — after `gf`, use `gt`/`gT` (see Buffers vs Tabpages
 vs Windows above) to get back to it.
 
