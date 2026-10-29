@@ -40,7 +40,7 @@ have the lines they need.
 | `ghostty` | `~/.config/ghostty/config` |
 | `term` | cava, btop and fastfetch configs |
 | `aerospace` | `.aerospace.toml` |
-| `bin` | `~/.local/bin` scripts (tmux screensaver, status animation, agent notify, ...) |
+| `bin` | `~/.local/bin` scripts (tmux screensaver, status animation, agent notify, dotfiles-sync, ...) |
 | `misc` | jj config, `.yarnrc`, PhpStorm code style |
 
 Not Stow packages:
@@ -48,7 +48,7 @@ Not Stow packages:
 | Folder | What it is |
 |---|---|
 | `macos/open-in-nvim/` | Builds `~/Applications/Open in Nvim.app`, a droplet that opens files in nvim in a new tmux window, and makes it the default app for the extensions in `extensions` (`install.sh`, needs `duti`) |
-| `macos/LaunchAgents/` | `wifi-ethernet-toggle` agent: Wi-Fi off while ethernet is connected. `install.sh` copies and loads it |
+| `macos/LaunchAgents/` | `wifi-ethernet-toggle`: Wi-Fi off while ethernet is connected. `dotfiles-sync`: hourly commit, pull and push of both repos (log in `~/Library/Logs/dotfiles-sync.log`). `install.sh` copies and loads them |
 | `blink/` | Kanagawa Dragon theme for Blink Shell on the iPad, with a pure black background. The live copy is in iCloud Drive under `Blink/` |
 
 ## Layout

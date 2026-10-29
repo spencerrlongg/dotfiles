@@ -1,0 +1,65 @@
+#!/bin/bash
+# dotfiles-sync: commits whatever changed in ~/dotfiles and ~/dotfiles-private, then
+# pulls and pushes both. The com.spencer.dotfiles-sync LaunchAgent runs it hourly;
+# it's also safe to run by hand. Output goes to ~/Library/Logs/dotfiles-sync.log.
+#
+# Only what .gitignore lets through gets staged (both repos ignore everything outside
+# their package folders), and every commit goes through the repo's gitleaks
+# pre-commit hook, so a secret stops that repo's sync instead of being pushed.
+# Anything that fails raises a macOS notification and leaves the repo as it was.
+set -uo pipefail
+export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+
+REPOS=("$HOME/dotfiles" "$HOME/dotfiles-private")
+LOG=$HOME/Library/Logs/dotfiles-sync.log
+
+notify() {
+  osascript -e "display notification \"$1\" with title \"dotfiles-sync\"" >/dev/null 2>&1
+}
+
+sync_repo() {
+  local repo=$1 name
+  name=$(basename "$repo")
+  [ -d "$repo/.git" ] || return 0
+  cd "$repo" || return 1
+
+  if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ] || [ -f .git/MERGE_HEAD ]; then
+    echo "$name: rebase or merge in progress, skipped"; return 1
+  fi
+  git symbolic-ref -q HEAD >/dev/null || { echo "$name: detached HEAD, skipped"; return 1; }
+
+  git add -A
+  if ! git diff --cached --quiet; then
+    if ! git commit -q -F - <<EOF
+Sync from $(scutil --get LocalHostName 2>/dev/null || hostname -s)
+
+$(git diff --cached --name-status)
+EOF
+    then
+      git reset -q
+      echo "$name: commit refused (pre-commit hook), changes left unstaged"; return 1
+    fi
+    echo "$name: committed $(git diff --name-only HEAD~1 HEAD | wc -l | tr -d ' ') file(s)"
+  fi
+
+  if ! git pull -q --rebase; then
+    git rebase --abort 2>/dev/null
+    echo "$name: pull --rebase failed (conflict?), nothing pushed"; return 1
+  fi
+  if [ -n "$(git rev-list '@{u}..HEAD' 2>/dev/null)" ]; then
+    git push -q || { echo "$name: push failed"; return 1; }
+    echo "$name: pushed"
+  fi
+}
+
+{
+  echo "--- $(date '+%Y-%m-%d %H:%M:%S')"
+  failed=()
+  for repo in "${REPOS[@]}"; do
+    sync_repo "$repo" 2>&1 || failed+=("$(basename "$repo")")
+  done
+  [ ${#failed[@]} -eq 0 ] || notify "Sync failed for ${failed[*]}; see ~/Library/Logs/dotfiles-sync.log"
+} >>"$LOG" 2>&1
+
+# Keep the log from growing forever
+tail -n 1000 "$LOG" >"$LOG.tmp" && mv "$LOG.tmp" "$LOG"

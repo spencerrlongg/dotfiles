@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Runs ~/.local/bin/dotfiles-sync: commits, pulls and pushes ~/dotfiles and ~/dotfiles-private. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.spencer.dotfiles-sync</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/spencer/.local/bin/dotfiles-sync</string>
+  </array>
+  <!-- Hourly. Runs missed while the Mac sleeps collapse into one on wake. -->
+  <key>StartInterval</key>
+  <integer>3600</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>LowPriorityIO</key>
+  <true/>
+</dict>
+</plist>
