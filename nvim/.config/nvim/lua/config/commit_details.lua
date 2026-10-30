@@ -1,4 +1,5 @@
--- Commit message bodies and separators for diffview's file-history panel (<leader>gU).
+-- Commit message bodies and separators for diffview's file-history panel (<leader>gU,
+-- <leader>gR).
 --
 -- Diffview only reads each commit's subject from git log (and truncates it to 72
 -- bytes), so an expanded commit shows nothing of its body. This draws the full

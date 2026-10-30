@@ -1,4 +1,5 @@
--- Review tracking for the unpushed-commits panel (<leader>gU).
+-- Review tracking for the commit panels: unpushed commits (<leader>gU) and branch
+-- review (<leader>gR, branch_review.lua, which reads the same marks for its counts).
 --
 -- Draws a marker on every file row in diffview's file-history panel and remembers
 -- which files have been reviewed across restarts. Marks are set by hand (`m` in the
@@ -72,6 +73,16 @@ local function read_state()
   end
 
   return state
+end
+
+-- Called after every toggle or clear, so views showing review progress can update.
+---@type fun()[]
+local listeners = {}
+
+local function changed()
+  for _, fn in ipairs(listeners) do
+    pcall(fn)
+  end
 end
 
 local function write_state()
@@ -364,6 +375,7 @@ function M.toggle()
 
   write_state()
   decorate(panel)
+  changed()
 end
 
 ---Drop every mark for a repo. Content keying makes stale marks harmless (they only
@@ -391,7 +403,21 @@ function M.clear()
   if panel then
     decorate(panel)
   end
+  changed()
   vim.notify(("Cleared %d review mark%s in %s"):format(count, count == 1 and "" or "s", toplevel))
+end
+
+---The marks for a repo, keyed like mark_key(): "<blob>:<path>", with "d<blob>" for
+---a file the commit deleted. Read-only; toggle() is the only writer.
+---@param toplevel string
+---@return table<string, integer>
+function M.marks(toplevel)
+  return read_state()[toplevel] or {}
+end
+
+---@param fn fun()
+function M.on_change(fn)
+  table.insert(listeners, fn)
 end
 
 local installed = false
