@@ -29,9 +29,25 @@ local M = {}
 local panel_ui = require("config.diffview_panel")
 local review_marks = require("config.review_marks")
 
--- The branch this repo's PRs merge into, in order of preference. develop comes first
--- because repos that have one (Snipe-IT) merge features there, not into main.
-local TRUNKS = { "origin/develop", "origin/main", "origin/master", "develop", "main", "master" }
+-- The branch this repo's PRs merge into, in order of preference. upstream comes before
+-- origin because in a fork (Snipe-IT) origin is the fork, whose develop can be years
+-- behind. develop comes before main because repos that have one merge features there.
+local TRUNKS = {
+  "upstream/develop",
+  "upstream/main",
+  "upstream/master",
+  "origin/develop",
+  "origin/main",
+  "origin/master",
+  "develop",
+  "main",
+  "master",
+}
+
+-- The picker skips file counts for branches with more commits of their own than this:
+-- `git log --raw` over thousands of commits would hold the picker up for seconds.
+-- Opening the branch still counts everything.
+local PICKER_COUNT_LIMIT = 300
 
 -- Branches that are never treated as another branch's base: a backup sitting in the
 -- middle of a feature would otherwise hide every commit below it.
@@ -93,7 +109,7 @@ end
 
 ---Every local branch with commits that aren't in trunk, with its stacked-on base.
 ---One rev-list per branch, run in parallel.
----@return table[] { ref, name, current, age, date, commits = string[] (newest first), base_ref?, base_name? }
+---@return table[] { ref, name, current, age, date, commits = string[] (newest first), own = number of commits since the base, base_ref?, base_name? }
 local function list_branches(toplevel, trunk)
   local out = git(toplevel, {
     "for-each-ref",
@@ -146,9 +162,11 @@ local function list_branches(toplevel, trunk)
       local at = tips[b.commits[i]]
       if at then
         b.base_ref, b.base_name = at[1].ref, at[1].name
+        b.own = i - 1
         break
       end
     end
+    b.own = b.own or #b.commits
   end
 
   table.sort(branches, function(x, y)
@@ -174,7 +192,7 @@ local function start_log(toplevel, range)
     "--raw",
     "--no-abbrev",
     "--diff-merges=first-parent",
-    "--format=%x1e%H%x1f%h%x1f%s%x1f%cr",
+    "--format=%x1e%H%x1f%s%x1f%cr",
     range,
   }, { text = true })
 end
@@ -189,7 +207,8 @@ local function parse_log(result)
   local commits = {}
   for record in (result.stdout or ""):gmatch("\30([^\30]*)") do
     local header, rest = record:match("^([^\n]*)\n?(.*)$")
-    local hash, short, subject, age = unpack(vim.split(header, "\31", { plain = true }))
+    -- --no-abbrev (full blob hashes) also makes %h full length, so shorten here.
+    local hash, subject, age = unpack(vim.split(header, "\31", { plain = true }))
     local keys = {}
     for line in rest:gmatch("[^\n]+") do
       local old, new, paths = line:match("^:%d+ %d+ (%x+) (%x+) %u%d*\t(.+)$")
@@ -200,7 +219,8 @@ local function parse_log(result)
         keys[#keys + 1] = blob .. ":" .. path
       end
     end
-    commits[#commits + 1] = { hash = hash, short = short, subject = subject or "", age = age or "", keys = keys }
+    commits[#commits + 1] =
+      { hash = hash, short = hash:sub(1, 7), subject = subject or "", age = age or "", keys = keys }
   end
   return commits
 end
@@ -255,7 +275,11 @@ local function winbar(s)
   if total > 0 and done == total then
     parts[#parts + 1] = "%#DiagnosticOk#✓ all reviewed%*"
   else
-    parts[#parts + 1] = ("%%#%s#%d/%d files reviewed%%*"):format(done > 0 and "DiagnosticWarn" or "Comment", done, total)
+    parts[#parts + 1] = ("%%#%s#%d/%d files reviewed%%*"):format(
+      done > 0 and "DiagnosticWarn" or "Comment",
+      done,
+      total
+    )
   end
   if s.hide then
     parts[#parts + 1] = "  %#Comment#(reviewed commits hidden)%*"
@@ -433,19 +457,23 @@ end
 ---@param s BranchReview
 open_panel = function(s)
   require("diffview").file_history(nil, { "-C" .. s.toplevel, "--range=" .. range_of(s) })
-  panel_ui.label(function()
-    return winbar(s)
-  end, panel_keys(s), function(buf, win)
-    s.buf, s.win = buf, win
-    reviews[buf] = s
-    vim.api.nvim_create_autocmd("BufWipeout", {
-      buffer = buf,
-      once = true,
-      callback = function()
-        reviews[buf] = nil
-      end,
-    })
-  end)
+  panel_ui.label(
+    function()
+      return winbar(s)
+    end,
+    panel_keys(s),
+    function(buf, win)
+      s.buf, s.win = buf, win
+      reviews[buf] = s
+      vim.api.nvim_create_autocmd("BufWipeout", {
+        buffer = buf,
+        once = true,
+        callback = function()
+          reviews[buf] = nil
+        end,
+      })
+    end
+  )
   vim.notify(summary(s), vim.log.levels.INFO)
 end
 
@@ -468,13 +496,17 @@ local function format_item(item)
   ret[#ret + 1] = { " " }
   ret[#ret + 1] = { a("← " .. item.base_name, 28, { truncate = true }), "Comment" }
   ret[#ret + 1] = { " " }
-  ret[#ret + 1] = { a(("%d commit%s"):format(item.count, item.count == 1 and "" or "s"), 11), "Number" }
+  ret[#ret + 1] = { a(("%d commit%s"):format(item.count, item.count == 1 and "" or "s"), 12), "Number" }
   ret[#ret + 1] = { " " }
-  local all = item.total > 0 and item.done == item.total
-  ret[#ret + 1] = {
-    a(all and "✓ reviewed" or ("%d/%d files"):format(item.done, item.total), 14),
-    all and "DiagnosticOk" or (item.done > 0 and "DiagnosticWarn" or "Comment"),
-  }
+  if item.total then
+    local all = item.total > 0 and item.done == item.total
+    ret[#ret + 1] = {
+      a(all and "✓ reviewed" or ("%d/%d files"):format(item.done, item.total), 14),
+      all and "DiagnosticOk" or (item.done > 0 and "DiagnosticWarn" or "Comment"),
+    }
+  else
+    ret[#ret + 1] = { a("–", 14), "Comment" }
+  end
   ret[#ret + 1] = { " " }
   ret[#ret + 1] = { item.age, "Comment" }
   return ret
@@ -540,27 +572,39 @@ function M.pick(dir, on_choose)
   -- Each branch's own commits (since its base), for the counts and the preview.
   local jobs = {}
   for i, b in ipairs(branches) do
-    jobs[i] = start_log(toplevel, (b.base_ref or trunk) .. ".." .. b.ref)
+    if b.own <= PICKER_COUNT_LIMIT then
+      jobs[i] = start_log(toplevel, (b.base_ref or trunk) .. ".." .. b.ref)
+    end
   end
 
   local items = {}
   for i, b in ipairs(branches) do
-    local commits = parse_log(jobs[i]:wait()) or {}
-    local done, total = count_reviewed(toplevel, commits)
     b.base_name = b.base_name or trunk
     b.trunk_name = trunk
-    items[#items + 1] = {
+    local item = {
       text = b.name,
       ref = b.ref,
       name = b.name,
       base_name = b.base_name,
       current = b.current,
-      count = #commits,
-      done = done,
-      total = total,
+      count = b.own,
       age = b.age,
-      preview = preview_of(b, commits),
     }
+    if jobs[i] then
+      local commits = parse_log(jobs[i]:wait()) or {}
+      item.done, item.total = count_reviewed(toplevel, commits)
+      item.preview = preview_of(b, commits)
+    else
+      item.preview = {
+        text = ("%s  ←  %s\n\n%d commits: too many to count here. Open it to review."):format(
+          b.name,
+          b.base_name,
+          b.own
+        ),
+        loc = false,
+      }
+    end
+    items[#items + 1] = item
   end
 
   Snacks.picker({

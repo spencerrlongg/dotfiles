@@ -90,13 +90,34 @@ bufferline. `:tabclose` refuses on the last tabpage. For a Diffview tab, use
 | `<leader>gD` | Open diff view (all changes) |
 | `<leader>gH` | File history for current file |
 | `<leader>gU` | Unpushed commits (vs upstream, or trunk if none) + their diffs |
+| `<leader>gR` | **Branch review**: pick a branch, review its commits like a PR (see below) |
 | `<leader>gX` | Close diff view |
 | `gf` | Open the actual file (not the diff) from the file panel, in the previous tab |
 | `<C-w><C-f>` | Open the actual file in a new split |
 | `<C-w>gf` | Open the actual file in a new tab |
-| `m` | (in the unpushed panel) Mark the file under the cursor reviewed — on a commit row, all of its files |
-| `r` | (in the unpushed panel) Refresh — reloads the commit list in place after a commit, amend, rebase or push; the current diff stays open while it loads |
+| `m` | (in the unpushed and branch review panels) Mark the file under the cursor reviewed — on a commit row, all of its files |
+| `r` | (in the unpushed and branch review panels) Refresh — reloads the commit list in place after a commit, amend, rebase or push; the current diff stays open while it loads |
 | `:ReviewMarksClear` | Drop every review mark for the current repo |
+
+Branch review (`<leader>gR`) measures a branch against trunk (upstream/ or origin/
+develop, main or master), not against what's pushed, so pushing mid-review changes
+nothing. The picker lists every local branch that isn't merged, with its base, commit
+count and how many of its files are reviewed. The preview lists its commits. A branch
+started from another local branch is stacked on it, and the review covers only its own
+commits. The branch doesn't need to be checked out.
+
+In the branch review panel, on top of `m` and diffview's keys:
+
+| Key | Action |
+|---|---|
+| `r` | Refresh: new commits, a rebase, or a base branch that has merged since |
+| `S` | This branch's own commits ↔ everything since trunk (whole stack) |
+| `H` | Hide / show commits whose files are all reviewed |
+| `B` | Switch to another branch in the same tab |
+| `D` | The whole branch as one diff vs its base (read-only, like a PR's "Files changed"); `<leader>gX` closes it |
+
+The winbar shows the branch, its base and `12/30 files reviewed`. Marks are shared
+with `<leader>gU`: both key them on file content.
 
 Moving through changes (diffview and vim defaults, work from either diff pane):
 
