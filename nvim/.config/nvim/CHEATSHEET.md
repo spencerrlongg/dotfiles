@@ -101,8 +101,9 @@ bufferline. `:tabclose` refuses on the last tabpage. For a Diffview tab, use
 
 Branch review (`<leader>gR`) measures a branch against trunk (upstream/ or origin/
 develop, main or master), not against what's pushed, so pushing mid-review changes
-nothing. The picker lists every local branch that isn't merged, with its base, commit
-count and how many of its files are reviewed. The preview lists its commits. A branch
+nothing. The picker lists the current branch and the most recently committed unmerged
+ones (5 in all), with each one's base, commit count and how many of its files are
+reviewed. The preview lists its commits. A branch
 started from another local branch is stacked on it, and the review covers only its own
 commits. The branch doesn't need to be checked out.
 

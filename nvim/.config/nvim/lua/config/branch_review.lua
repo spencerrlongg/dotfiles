@@ -49,6 +49,10 @@ local TRUNKS = {
 -- Opening the branch still counts everything.
 local PICKER_COUNT_LIMIT = 300
 
+-- How many branches the picker lists: the current one plus the most recently
+-- committed others. Older branches are still found as the base of a listed one.
+local RECENT_BRANCHES = 5
+
 -- Branches that are never treated as another branch's base: a backup sitting in the
 -- middle of a feature would otherwise hide every commit below it.
 local NOT_A_BASE = { "^backup/" }
@@ -90,6 +94,33 @@ local function git(dir, args)
   return result.stdout or ""
 end
 
+-- At most this many git processes at once. Each holds a few pipes, and nvim's
+-- open-file limit is 256 on macOS (launchd's default), so one process per branch
+-- in a repo with a couple hundred branches fails with EMFILE.
+local MAX_JOBS = 16
+
+---Runs `cmds` (index -> argv, gaps allowed) MAX_JOBS at a time. Returns the
+---vim.system results under the same indexes; a command that couldn't start gets
+---{ code = -1 }.
+---@param cmds table<integer, string[]>
+---@return table<integer, vim.SystemCompleted>
+local function run_all(cmds)
+  local keys = vim.tbl_keys(cmds)
+  table.sort(keys)
+  local results = {}
+  for first = 1, #keys, MAX_JOBS do
+    local batch = {}
+    for i = first, math.min(first + MAX_JOBS - 1, #keys) do
+      local ok, job = pcall(vim.system, cmds[keys[i]], { text = true })
+      batch[keys[i]] = ok and job or false
+    end
+    for key, job in pairs(batch) do
+      results[key] = job and job:wait() or { code = -1 }
+    end
+  end
+  return results
+end
+
 local function find_trunk(toplevel)
   for _, ref in ipairs(TRUNKS) do
     if git(toplevel, { "rev-parse", "--verify", "--quiet", ref }) then
@@ -107,51 +138,63 @@ local function can_be_base(name)
   return true
 end
 
----Every local branch with commits that aren't in trunk, with its stacked-on base.
----One rev-list per branch, run in parallel.
----@return table[] { ref, name, current, age, date, commits = string[] (newest first), own = number of commits since the base, base_ref?, base_name? }
-local function list_branches(toplevel, trunk)
+---Unmerged local branches (commits that aren't in trunk), each with its stacked-on
+---base. Without `want`: the current branch, then the most recently committed others,
+---RECENT_BRANCHES in all, newest first. With `want` (a full ref): only that branch.
+---Branches are checked newest first, MAX_JOBS rev-lists at a time, stopping once
+---there are enough.
+---@param want? string
+---@return table[] { ref, name, current, age, commits = string[] (newest first), own = number of commits since the base, base_ref?, base_name? }
+local function list_branches(toplevel, trunk, want)
   local out = git(toplevel, {
     "for-each-ref",
-    "--format=%(refname)%09%(HEAD)%09%(committerdate:unix)%09%(committerdate:relative)",
+    "--sort=-committerdate",
+    "--format=%(refname)%09%(objectname)%09%(HEAD)%09%(committerdate:relative)",
     "refs/heads",
   }) or ""
 
-  local all = {}
+  local all, candidates = {}, {}
   for line in out:gmatch("[^\n]+") do
-    local ref, head, date, age = line:match("^(%S+)\t(.)\t(%d+)\t(.*)$")
+    local ref, tip, head, age = line:match("^(%S+)\t(%x+)\t(.)\t(.*)$")
     if ref then
-      all[#all + 1] = {
-        ref = ref,
-        name = ref:gsub("^refs/heads/", ""),
-        current = head == "*",
-        date = tonumber(date),
-        age = age,
-      }
-    end
-  end
-
-  local jobs = {}
-  for i, b in ipairs(all) do
-    jobs[i] = vim.system({ "git", "-C", toplevel, "rev-list", trunk .. ".." .. b.ref }, { text = true })
-  end
-  local branches = {}
-  for i, job in ipairs(jobs) do
-    local result = job:wait()
-    if result.code == 0 then
-      all[i].commits = vim.split(vim.trim(result.stdout or ""), "\n", { trimempty = true })
-      if #all[i].commits > 0 then
-        branches[#branches + 1] = all[i]
+      local b = { ref = ref, name = ref:gsub("^refs/heads/", ""), tip = tip, current = head == "*", age = age }
+      all[#all + 1] = b
+      if not want or ref == want then
+        -- The current branch goes first; the rest stay in date order.
+        table.insert(candidates, (b.current and not want) and 1 or #candidates + 1, b)
       end
     end
   end
 
-  -- tip hash -> branches ending there
+  local limit = want and 1 or RECENT_BRANCHES
+  local branches = {}
+  for first = 1, #candidates, MAX_JOBS do
+    local cmds = {}
+    for i = first, math.min(first + MAX_JOBS - 1, #candidates) do
+      cmds[i] = { "git", "-C", toplevel, "rev-list", trunk .. ".." .. candidates[i].ref }
+    end
+    local results = run_all(cmds)
+    for i = first, math.min(first + MAX_JOBS - 1, #candidates) do
+      local b = candidates[i]
+      b.commits = results[i].code == 0 and vim.split(vim.trim(results[i].stdout or ""), "\n", { trimempty = true })
+        or {}
+      if #b.commits > 0 and #branches < limit then
+        branches[#branches + 1] = b
+      end
+    end
+    if #branches >= limit then
+      break
+    end
+  end
+
+  -- tip hash -> branches ending there. Every branch counts, not just the listed ones,
+  -- so an older branch can still be the base of a recent one. A merged branch's tip is
+  -- in trunk, so it never turns up in a trunk..branch walk below.
   local tips = {}
-  for _, b in ipairs(branches) do
+  for _, b in ipairs(all) do
     if can_be_base(b.name) then
-      tips[b.commits[1]] = tips[b.commits[1]] or {}
-      table.insert(tips[b.commits[1]], b)
+      tips[b.tip] = tips[b.tip] or {}
+      table.insert(tips[b.tip], b)
     end
   end
 
@@ -169,20 +212,14 @@ local function list_branches(toplevel, trunk)
     b.own = b.own or #b.commits
   end
 
-  table.sort(branches, function(x, y)
-    if x.current ~= y.current then
-      return x.current
-    end
-    return x.date > y.date
-  end)
   return branches
 end
 
----Starts `git log` for a range in the shape the counts need: one record per commit,
+---The `git log` for a range in the shape the counts need: one record per commit,
 ---with the blob of every file it touched. Same flags as diffview's file history, so
 ---the files match the panel's rows.
-local function start_log(toplevel, range)
-  return vim.system({
+local function log_cmd(toplevel, range)
+  return {
     "git",
     "-C",
     toplevel,
@@ -194,10 +231,10 @@ local function start_log(toplevel, range)
     "--diff-merges=first-parent",
     "--format=%x1e%H%x1f%s%x1f%cr",
     range,
-  }, { text = true })
+  }
 end
 
----Parses start_log() output. Keys follow review_marks' mark_key(): the file's blob
+---Parses the output of log_cmd(). Keys follow review_marks' mark_key(): the file's blob
 ---after the commit, or "d" + the blob before it when the commit deleted the file.
 ---@return ReviewCommit[]|nil
 local function parse_log(result)
@@ -299,16 +336,12 @@ end
 ---@return boolean ok, string? err
 local function load(s)
   local branch
-  for _, b in ipairs(list_branches(s.toplevel, s.trunk)) do
-    if b.ref == s.ref then
-      branch = b
-    end
-  end
+  branch = list_branches(s.toplevel, s.trunk, s.ref)[1]
   if not branch then
     return false, ("%s has no commits that aren't in %s (merged, or deleted)"):format(s.name, s.trunk)
   end
   s.base_ref, s.base_name = branch.base_ref, branch.base_name
-  local commits = parse_log(start_log(s.toplevel, range_of(s)):wait())
+  local commits = parse_log(run_all({ log_cmd(s.toplevel, range_of(s)) })[1])
   if not commits then
     return false, "git log failed for " .. range_of(s)
   end
@@ -570,12 +603,13 @@ function M.pick(dir, on_choose)
   end
 
   -- Each branch's own commits (since its base), for the counts and the preview.
-  local jobs = {}
+  local cmds = {}
   for i, b in ipairs(branches) do
     if b.own <= PICKER_COUNT_LIMIT then
-      jobs[i] = start_log(toplevel, (b.base_ref or trunk) .. ".." .. b.ref)
+      cmds[i] = log_cmd(toplevel, (b.base_ref or trunk) .. ".." .. b.ref)
     end
   end
+  local logs = run_all(cmds)
 
   local items = {}
   for i, b in ipairs(branches) do
@@ -590,8 +624,8 @@ function M.pick(dir, on_choose)
       count = b.own,
       age = b.age,
     }
-    if jobs[i] then
-      local commits = parse_log(jobs[i]:wait()) or {}
+    if logs[i] then
+      local commits = parse_log(logs[i]) or {}
       item.done, item.total = count_reviewed(toplevel, commits)
       item.preview = preview_of(b, commits)
     else
@@ -608,11 +642,11 @@ function M.pick(dir, on_choose)
   end
 
   Snacks.picker({
-    title = "Branch Review (vs " .. trunk .. ")",
+    title = ("Branch Review: %d most recent (vs %s)"):format(#branches, trunk),
     items = items,
     format = format_item,
     preview = "preview",
-    -- Keep the current branch first, then most recently committed.
+    -- Keep list_branches' order: current branch first, then most recently committed.
     sort = { fields = { "score:desc", "idx" } },
     confirm = function(picker, item)
       picker:close()
