@@ -46,7 +46,7 @@ brew "cocoapods"     # React Native / Expo iOS builds
 brew "watchman"
 brew "rbenv"
 # brew "nginx"       # left over from Valet; Herd runs its own
-brew "anomalyco/tap/opencode"
+brew "anomalyco/tap/opencode-v2"   # OpenCode 2; plain "opencode" in the tap is 1.x
 cask "herd"          # PHP, Composer, nginx for Laravel sites
 cask "phpstorm"
 # cask "jetbrains-toolbox"
