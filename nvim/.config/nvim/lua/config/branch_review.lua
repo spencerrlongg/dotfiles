@@ -6,8 +6,8 @@
 -- part-way through review and still be reviewed as a whole. The branch doesn't have
 -- to be checked out.
 --
--- Stacked branches: when another local branch's tip is in this branch's history
--- (feature/b was started from feature/a), that branch is the base and the review
+-- Stacked branches: when another local branch's tip is in this branch's first-parent
+-- history (feature/b was started from feature/a), that branch is the base and the review
 -- covers only this branch's own commits. `S` in the panel switches to everything
 -- since trunk. Branches under backup/ never count as a base.
 --
@@ -144,7 +144,7 @@ end
 ---Branches are checked newest first, MAX_JOBS rev-lists at a time, stopping once
 ---there are enough.
 ---@param want? string
----@return table[] { ref, name, current, age, commits = string[] (newest first), own = number of commits since the base, base_ref?, base_name? }
+---@return table[] { ref, name, current, age, first_parents = string[] (newest first), own = commits since the base, since_trunk = commits since trunk, base_ref?, base_name? }
 local function list_branches(toplevel, trunk, want)
   local out = git(toplevel, {
     "for-each-ref",
@@ -171,14 +171,17 @@ local function list_branches(toplevel, trunk, want)
   for first = 1, #candidates, MAX_JOBS do
     local cmds = {}
     for i = first, math.min(first + MAX_JOBS - 1, #candidates) do
-      cmds[i] = { "git", "-C", toplevel, "rev-list", trunk .. ".." .. candidates[i].ref }
+      -- First parents only: a branch merged *into* this one sits on a second-parent
+      -- side, and must not be mistaken for the branch this one was started from.
+      cmds[i] = { "git", "-C", toplevel, "rev-list", "--first-parent", trunk .. ".." .. candidates[i].ref }
     end
     local results = run_all(cmds)
     for i = first, math.min(first + MAX_JOBS - 1, #candidates) do
       local b = candidates[i]
-      b.commits = results[i].code == 0 and vim.split(vim.trim(results[i].stdout or ""), "\n", { trimempty = true })
+      b.first_parents = results[i].code == 0
+          and vim.split(vim.trim(results[i].stdout or ""), "\n", { trimempty = true })
         or {}
-      if #b.commits > 0 and #branches < limit then
+      if #b.first_parents > 0 and #branches < limit then
         branches[#branches + 1] = b
       end
     end
@@ -198,18 +201,31 @@ local function list_branches(toplevel, trunk, want)
     end
   end
 
-  -- The base is the branch whose tip comes first walking down from this branch's tip.
-  -- Index 1 is the tip itself, so a branch pointing at the same commit isn't a base.
+  -- The base is the branch whose tip comes first walking down this branch's first
+  -- parents. Index 1 is the tip itself, so a branch pointing at the same commit isn't
+  -- a base.
   for _, b in ipairs(branches) do
-    for i = 2, #b.commits do
-      local at = tips[b.commits[i]]
+    for i = 2, #b.first_parents do
+      local at = tips[b.first_parents[i]]
       if at then
         b.base_ref, b.base_name = at[1].ref, at[1].name
-        b.own = i - 1
         break
       end
     end
-    b.own = b.own or #b.commits
+  end
+
+  -- Counts include every parent, so commits that came in through a merge count too.
+  local cmds = {}
+  for i, b in ipairs(branches) do
+    cmds[2 * i - 1] = { "git", "-C", toplevel, "rev-list", "--count", trunk .. ".." .. b.ref }
+    if b.base_ref then
+      cmds[2 * i] = { "git", "-C", toplevel, "rev-list", "--count", b.base_ref .. ".." .. b.ref }
+    end
+  end
+  local counts = run_all(cmds)
+  for i, b in ipairs(branches) do
+    b.since_trunk = tonumber(vim.trim(counts[2 * i - 1].stdout or "")) or #b.first_parents
+    b.own = b.base_ref and tonumber(vim.trim(counts[2 * i] and counts[2 * i].stdout or "")) or b.since_trunk
   end
 
   return branches
@@ -550,8 +566,8 @@ end
 local function preview_of(b, commits)
   local lines = {
     ("%s  ←  %s"):format(b.name, b.base_name),
-    b.base_ref and ("stacked on %s · %d commits since %s"):format(b.base_name, #b.commits, b.trunk_name)
-      or ("%d commits since %s"):format(#b.commits, b.trunk_name),
+    b.base_ref and ("stacked on %s · %d commits since %s"):format(b.base_name, b.since_trunk, b.trunk_name)
+      or ("%d commits since %s"):format(b.since_trunk, b.trunk_name),
     "",
   }
   local extmarks = {
