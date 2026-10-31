@@ -47,6 +47,7 @@ brew "watchman"
 brew "rbenv"
 # brew "nginx"       # left over from Valet; Herd runs its own
 brew "anomalyco/tap/opencode-v2"   # OpenCode 2; plain "opencode" in the tap is 1.x
+brew "pi-coding-agent"   # pi (pi.dev); pulls in Homebrew node, nvm's node still comes first in shells
 cask "herd"          # PHP, Composer, nginx for Laravel sites
 cask "phpstorm"
 # cask "jetbrains-toolbox"
