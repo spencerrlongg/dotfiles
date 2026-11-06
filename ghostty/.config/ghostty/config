@@ -1,9 +1,11 @@
 font-family = JetBrains Mono Nerd Font
 
-background-opacity = 0.97
-# Light blur (true = 20). macOS re-blurs behind the window on every frame Ghostty
-# draws, so lower is a little cheaper and false skips it entirely
-background-blur = 5
+# The glass only shows through the part of the background that isn't opaque,
+# so this sets how much of it you see. 0.97 hid it almost completely.
+background-opacity = 0.88
+# Native macOS 26 Liquid Glass. macos-glass-clear is the more see-through
+# variant; an integer (e.g. 5) goes back to the plain Gaussian blur
+background-blur = macos-glass-regular
 
 # Kanagawa Dragon, matching Neovim, tmux, btop, and the 16-color terminal apps
 theme = Kanagawa Dragon
