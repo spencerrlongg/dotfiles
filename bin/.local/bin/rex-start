@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# rex-start — restore the dev session layout in Rex (the Rex version of tmux-start)
+# Sessions, in picker order: home, snipe-mobile, servers, snipe-it
+# (the showcase is window 3, "garden", of home, like tmux-start + tmux-showcase)
+# Created in that order. A session whose label already exists is skipped, and so is
+# home's garden window, so the script is safe to run again after closing one of them.
+
+set -euo pipefail
+
+command -v rex >/dev/null || { echo "rex not found on PATH" >&2; exit 1; }
+command -v jq  >/dev/null || { echo "jq not found on PATH" >&2; exit 1; }
+
+# nvim windows run nvim-project as the window's own command (not typed into a
+# shell): it restores the project's last nvim session, and quitting nvim closes
+# the window
+NVIM_PROJECT="$HOME/.local/bin/nvim-project"
+
+existing=$(rex ls --json | jq -r '.sessions[].label')
+has_session() { grep -qxF "$1" <<<"$existing"; }
+
+# Type a command into a pane's shell and press Return, like tmux send-keys, so
+# quitting the program leaves a shell behind. Waits (up to 5s) for the shell to
+# draw something first, so the keys don't land while .zshrc is still starting.
+type_cmd() {
+  local session=$1 block=$2 cmd=$3
+  for _ in {1..50}; do
+    [[ -n $(rex capture -s "$session" -b "$block" --trim 2>/dev/null) ]] && break
+    sleep 0.1
+  done
+  rex send -s "$session" -b "$block" "$cmd"
+  rex send-key -s "$session" -b "$block" enter
+}
+
+# new_session LABEL DIR WINDOW → prints "SESSION_ID BLOCK_ID" of the first pane (a shell)
+new_session() {
+  rex new "$1" -c "$2" --window "$3" --json |
+    jq -er '"\(.session_id) \(.initial_windows[0].block_ids[0])"'
+}
+
+# --- home: claude, devnull, and garden (the showcase; Rex version of tmux-showcase) ---
+if ! has_session home; then
+  read -r s b < <(new_session home "$HOME" claude)
+  type_cmd "$s" "$b" 'claude'
+  devnull=$(rex window new -s "$s" devnull -c "$HOME" --focus=false --json | jq -er '.block_ids[0]')
+  type_cmd "$s" "$devnull" 'devnull'
+fi
+
+# garden, built when home doesn't have one yet:
+#   ┌──────────────┬─────────┐
+#   │   cbonsai    │tty-clock│
+#   │              ├─────────┤
+#   │              │  wave   │
+#   ├──────────────┴─────────┤
+#   │         btop           │
+#   └────────────────────────┘
+if ! rex window ls -s home --json | jq -e '.windows[] | select(.label == "garden")' >/dev/null; then
+  s=$(rex ls --json | jq -er '.sessions[] | select(.label == "home") | .session_id' | head -n1)
+  tree=$(rex window new -s "$s" garden -c "$HOME" --focus=false --json | jq -er '.block_ids[0]')
+  rex block rename -s "$s" "$tree" '盆栽 bonsai' >/dev/null
+  split() { rex split -s "$s" --focus=false --json "$@" | jq -er '.block_ids[0]'; }
+  stats=$(split -b "$tree"  --split=below --ratio 43 --label '監視 btop'  -c "$HOME")
+  clock=$(split -b "$tree"  --split=right --ratio 36 --label '時計 clock' -c "$HOME")
+  wave=$(split  -b "$clock" --split=below --ratio 65 --label '浪裏 wave'  -c "$HOME")
+  type_cmd "$s" "$tree"  'clear && cbonsai -l -i -w 6 -M 4'
+  type_cmd "$s" "$stats" 'clear && btop'
+  type_cmd "$s" "$clock" 'clear && tty-clock -c -s -b -C 4 -n'
+  type_cmd "$s" "$wave"  'clear && kanagawa-wave --fps 12'
+fi
+
+# --- snipe-mobile ---
+if ! has_session snipe-mobile; then
+  dir="$HOME/dev/snipe-it-mobile"
+  read -r s b < <(new_session snipe-mobile "$dir" claude)
+  type_cmd "$s" "$b" 'claude'
+  rex window new -s "$s" nvim -c "$dir" --focus=false -- "$NVIM_PROJECT" >/dev/null
+fi
+
+# --- servers ---
+if ! has_session servers; then
+  read -r s b < <(new_session servers "$HOME/dev/snipe-it" ngrok)
+  type_cmd "$s" "$b" 'ngrok start snipe-it'
+  node=$(rex window new -s "$s" node -c "$HOME/dev/snipe-it-mobile" --focus=false --json |
+    jq -er '.block_ids[0]')
+  type_cmd "$s" "$node" 'EXPO_UNSTABLE_MCP_SERVER=1 npx expo start'
+fi
+
+# --- snipe-it ---
+if ! has_session snipe-it; then
+  dir="$HOME/dev/snipe-it"
+  read -r s b < <(new_session snipe-it "$dir" claude)
+  type_cmd "$s" "$b" 'claude'
+  rex window new -s "$s" nvim -c "$dir" --focus=false -- "$NVIM_PROJECT" >/dev/null
+fi
+
+# Open on home's garden window in the Rex app (works when exactly one Rex app is
+# connected; pass REX_CLIENT=<label> to pick one when several are)
+home_session=$(rex ls --json | jq -r '.sessions[] | select(.label == "home") | .session_id' | head -n1)
+if [[ -n $home_session ]]; then
+  rex window focus -s "$home_session" garden >/dev/null 2>&1 || true
+  rex do session.select session_id="$home_session" >/dev/null 2>&1 ||
+    echo "Created the sessions; couldn't switch the app to home (choose it in the sidebar)." >&2
+fi

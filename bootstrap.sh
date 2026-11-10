@@ -11,7 +11,7 @@ set -euo pipefail
 DOTFILES=${DOTFILES:-$(cd "$(dirname "$0")" && pwd)}
 DOTFILES_PRIVATE=${DOTFILES_PRIVATE:-$HOME/dotfiles-private}
 PRIVATE_REPO=spencerrlongg/dotfiles-private
-PACKAGES=(zsh git tmux nvim ghostty term aerospace bin misc)
+PACKAGES=(zsh git tmux nvim ghostty rex term aerospace bin misc)
 PRIVATE_PACKAGES=(claude codex)   # plus memory, linked separately (see link_memory)
 NODE_VERSION=24
 NPM_GLOBALS=(@openai/codex corepack)
@@ -90,6 +90,11 @@ step_tools() {
   say "bun"
   if [ -x "$HOME/.bun/bin/bun" ]; then echo "already installed"
   else curl -fsSL https://bun.sh/install | bash
+  fi
+
+  say "devnull (dev-null.sh TUI; updates itself, lives in ~/.local/bin outside the repo)"
+  if [ -x "$HOME/.local/bin/devnull" ]; then echo "already installed"
+  else curl -fsSL https://raw.githubusercontent.com/WendellAdriel/dev-null-tui/main/scripts/install.sh | sh
   fi
 
   say "Claude Code"
@@ -174,6 +179,9 @@ step_checklist() {
   - Ghostty: System Settings > Privacy & Security > Screen & System Audio Recording >
     System Audio Recording Only: add Ghostty. Quit Ghostty fully, relaunch, restart the
     tmux server. Without it cava never runs.
+  - Rex: download Rex Beta (no cask yet) and sign in. On this Mac's own server,
+    rex-start builds the sessions. On a laptop that uses another Mac as the host:
+    rex hosts add, then rex -S <host> to work there (the sessions live on the host)
   - AeroSpace and Thaw: grant Accessibility when asked
   - Battery: set AlDente's charge limit to 80% (it's in the Brewfile). Use Top Up
     before days away from the desk. When 80% stops lasting the day, raise it to

@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# fzf picker for every Rex session/tab: the Rex version of tmux-session-menu.
+# Runs in a floating pane opened by the session_menu action in ~/.config/rex/init.lua
+# (cmd+k and ctrl+a > j). Opens in navigation mode: j/k move, Enter picks, 0-9 jump
+# straight to the numbered session. / switches to search (typing filters, j/k type
+# letters); Esc goes back to navigation, and Esc again closes the pane.
+#
+# Usage: rex-session-menu [CLIENT_ID]   (the Rex app to switch; the action passes it)
+#
+# Speed: one `rex do` Lua call collects, sorts and formats every row, and a second
+# one, started in the background at the same time, writes each tab's preview to a
+# temp file, so moving the cursor reads a file instead of calling rex.
+set -euo pipefail
+
+# The pane starts with the login environment only, which doesn't have Homebrew's bin
+export PATH="/opt/homebrew/bin:$HOME/.local/bin:$PATH"
+
+CLIENT=${1:-${REX_CLIENT:-}}
+SELF=${REX_BLOCK:-}
+PREVIEW_LINES=80
+
+# Session order: TOP first in this order, then any others in Rex's order, then
+# BOTTOM. Sessions that aren't running are skipped. The first ten get digit
+# hotkeys 0-9.
+TOP="home snipe-mobile"
+BOTTOM="claude-workspace"
+
+PREVIEWS=$(mktemp -d "${TMPDIR:-/tmp}/rex-session-menu.XXXXXX")
+preview_pid=
+trap 'kill "$preview_pid" 2>/dev/null || true; rm -rf "$PREVIEWS"' EXIT
+
+# Shared Lua: every block in a window (layouts and floating layers hold split trees),
+# and the tab's pane to show: its focused one, or another if that's this picker.
+read -r -d '' COMMON <<'LUA' || true
+local T = "com.superlogical.terminal"
+local self = rex.args.self or ""
+local function blocks_of(w)
+  local ids = {}
+  local function walk(node)
+    if not node then return end
+    if node.block_id then ids[#ids + 1] = node.block_id end
+    if node.split then walk(node.split.before); walk(node.split.after) end
+  end
+  for _, layer in ipairs(w.layers or {}) do walk(layer.layout) end
+  return ids
+end
+local function shown_block(w, ids)
+  local b = w.focused_block_id or ""
+  if b ~= self then return b, ids end
+  for _, id in ipairs(ids) do if id ~= self then return id, ids end end
+  return "", ids
+end
+local function each_window(fn)
+  for _, s in ipairs(rex.call("session.list").sessions) do
+    local att = rex.call("session.attach", { session_id = s.session_id })
+    for _, w in ipairs(att and att.view and att.view.windows or {}) do
+      local ids = blocks_of(w)
+      fn(s, w, shown_block(w, ids))
+    end
+  end
+end
+LUA
+
+# Writes the last PREVIEW_LINES lines of each tab's pane, with colors, to PREVIEWS/<block_id>
+read -r -d '' PREVIEW_PART <<'LUA' || true
+
+local n = tonumber(rex.args.lines) or 80
+each_window(function(s, w, b)
+  if b == "" then return end
+  local r = rex.block.call(T, "format", { session_id = s.session_id, block_id = b, format = "vt", trim = true, max_bytes = 900000 })
+  if not (r and r.content) then return end
+  local lines = {}
+  for line in (r.content .. "\n"):gmatch("(.-)\r?\n") do lines[#lines + 1] = line end
+  local f = io.open(rex.args.dir .. "/" .. b, "w")
+  if f then f:write(table.concat(lines, "\n", math.max(1, #lines - n + 1), #lines)); f:close() end
+end)
+LUA
+
+# Prints the header, then a DIGITS line (session ids for keys 0-9), then one fzf row
+# per tab: session_id<TAB>window_id<TAB>block_id<TAB>colored display text.
+# Agent state is the most urgent Program Status report in the tab (blocked, error
+# or done); Claude Code reports these to Rex itself.
+read -r -d '' LIST_PART <<'LUA' || true
+
+-- Kanagawa Dragon palette, matching tmux-session-menu
+local E = string.char(27)
+local function rgb(r, g, b, bold) return E .. "[" .. (bold and "1;" or "") .. "38;2;" .. r .. ";" .. g .. ";" .. b .. "m" end
+local GREEN, FG, ORANGE, RED = rgb(152, 187, 108), rgb(197, 201, 197), rgb(255, 160, 102), rgb(196, 116, 110)
+local SAGE, DIM, HEAD, OFF = rgb(135, 169, 135), rgb(98, 94, 90), rgb(115, 124, 115, true), E .. "[0m"
+local rank = { blocked = 3, error = 2, done = 1 }
+local marks = { done = GREEN .. "󰄬" .. OFF, blocked = ORANGE .. "󰋗" .. OFF, error = RED .. "󰅖" .. OFF }
+
+local rows, order = {}, {}
+each_window(function(s, w, b, ids)
+  local dir = ""
+  if b ~= "" then
+    local p = rex.block.call(T, "pwd", { session_id = s.session_id, block_id = b })
+    local path = p and p.pwd and p.pwd:gsub("^file://[^/]*", "")
+    if not path then
+      local pr = rex.block.call(T, "process", { session_id = s.session_id, block_id = b })
+      path = pr and pr.foreground and pr.foreground.cwd
+    end
+    if path then dir = path:gsub("/+$", ""):match("([^/]+)$") or "/" end
+  end
+  local state, best = "", 0
+  for _, id in ipairs(ids) do
+    if id ~= self then
+      local st = rex.block.call(T, "program_status", { session_id = s.session_id, block_id = id })
+      for _, r in ipairs(st and st.records or {}) do
+        if (rank[r.state] or 0) > best then best, state = rank[r.state], r.state end
+      end
+    end
+  end
+  local name = s.label or ""
+  if not rows[name] then rows[name] = {}; order[#order + 1] = name end
+  table.insert(rows[name], { sid = s.session_id, wid = w.window_id, b = b, tab = w.label or "", dir = dir, state = state })
+end)
+
+-- TOP, then the rest in Rex's order, then BOTTOM
+local pinned, sessions = {}, {}
+for name in (rex.args.top .. " " .. rex.args.bottom):gmatch("%S+") do pinned[name] = true end
+for name in rex.args.top:gmatch("%S+") do if rows[name] then sessions[#sessions + 1] = name end end
+for _, name in ipairs(order) do if not pinned[name] then sessions[#sessions + 1] = name end end
+for name in rex.args.bottom:gmatch("%S+") do if rows[name] then sessions[#sessions + 1] = name end end
+
+-- Column widths, never narrower than the labels
+local ws, ww = #"SESSION", #"TAB"
+for _, name in ipairs(sessions) do
+  ws = math.max(ws, #name)
+  for _, r in ipairs(rows[name]) do ww = math.max(ww, #r.tab) end
+end
+local function pad(text, width) return text .. string.rep(" ", width - #text) end
+local bar = DIM .. "│" .. OFF
+
+io.write(HEAD .. "#" .. OFF .. " " .. bar .. " " .. HEAD .. pad("SESSION", ws) .. OFF .. " " .. bar .. " "
+  .. HEAD .. pad("TAB", ww) .. OFF .. "   " .. bar .. " " .. HEAD .. "DIRECTORY" .. OFF .. "\n")
+local digits = {}
+for i, name in ipairs(sessions) do if i <= 10 then digits[#digits + 1] = rows[name][1].sid end end
+io.write("DIGITS\t" .. table.concat(digits, "\t") .. "\n")
+for i, name in ipairs(sessions) do
+  local num = i <= 10 and tostring(i - 1) or " "
+  for _, r in ipairs(rows[name]) do
+    io.write(r.sid .. "\t" .. r.wid .. "\t" .. r.b .. "\t"
+      .. GREEN .. num .. OFF .. " " .. bar .. " " .. GREEN .. pad(name, ws) .. OFF .. " " .. bar .. " "
+      .. FG .. pad(r.tab, ww) .. OFF .. " " .. (marks[r.state] or " ") .. " " .. bar .. " " .. SAGE .. r.dir .. OFF .. "\n")
+  end
+end
+LUA
+
+PREVIEW_QUERY=$COMMON$'\n'$PREVIEW_PART
+LIST_QUERY=$COMMON$'\n'$LIST_PART
+
+rex do - self="$SELF" dir="$PREVIEWS" lines="$PREVIEW_LINES" <<<"$PREVIEW_QUERY" >/dev/null 2>&1 &
+preview_pid=$!
+
+{
+  IFS= read -r header
+  IFS=$'\t' read -r -a digits
+  rows=$(cat)
+} < <(rex do - self="$SELF" top="$TOP" bottom="$BOTTOM" <<<"$LIST_QUERY")
+
+# One --bind per numbered session: the digit ends fzf with that session and no tab,
+# so the app shows the session's active tab.
+binds=()
+for (( i = 1; i < ${#digits[@]}; i++ )); do
+  binds+=(--bind "$(( i - 1 )):become(printf '%s\t\n' '${digits[$i]}')")
+done
+
+# Preview from the file the background query wrote; until it lands, ask rex directly
+picked=$(
+  fzf ${binds[@]+"${binds[@]}"} <<<"$rows" \
+    --no-input \
+    --bind 'j:down,k:up' \
+    --bind '/:show-input+unbind(j,k,/)' \
+    --bind 'esc:transform([[ $FZF_INPUT_STATE = enabled ]] && echo clear-query || echo abort)+hide-input+rebind(j,k,/)' \
+    --ansi \
+    --delimiter=$'\t' \
+    --with-nth=4 \
+    --reverse \
+    --cycle \
+    --border=none \
+    --info=inline \
+    --prompt='  ' \
+    --pointer='▸' \
+    --header="$header" \
+    --color='fg:#c5c9c5,bg:-1,hl:#ffa066,fg+:#c5c9c5,bg+:#282727,hl+:#ffa066' \
+    --color='info:#737c73,prompt:#98bb6c,pointer:#ffa066,border:#625e5a,header:#737c73' \
+    --preview="[[ -n {3} ]] || exit 0; cat '$PREVIEWS'/{3} 2>/dev/null || rex capture -s {1} -b {3} --format=vt --trim | tail -n $PREVIEW_LINES" \
+    --preview-window='down,60%,border-top,follow' \
+) || exit 0
+
+[[ -z $picked ]] && exit 0
+IFS=$'\t' read -r sid wid _ <<<"$picked"
+args=(session_id="$sid")
+[[ -n $wid ]] && args+=(window_id="$wid")
+
+# Switch the app that opened the menu, or the one connected app if that client is
+# gone (or isn't an app, as when the action runs from the CLI). Switching is a
+# client action, which Rex.app accepts only with Remote Control on; on failure,
+# show why instead of letting the pane vanish.
+if ! { [[ -n $CLIENT ]] && rex -C "$CLIENT" do session.select "${args[@]}" >/dev/null 2>&1; } &&
+   ! err=$(rex do session.select "${args[@]}" 2>&1 >/dev/null); then
+  printf '\n  \033[38;2;255;160;102mCould not switch:\033[0m %s\n\n  Press any key to close.' "$err"
+  read -rsn1
+fi

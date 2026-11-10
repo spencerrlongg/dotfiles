@@ -1,7 +1,8 @@
 # dotfiles
 
-Config for Spencer's Mac: zsh, tmux, Neovim, Ghostty, AeroSpace, and the `~/.local/bin`
-scripts (tmux screensaver, status animation, agent notifications, session launcher).
+Config for Spencer's Mac: zsh, tmux, Rex, Neovim, Ghostty, AeroSpace, and the `~/.local/bin`
+scripts (tmux screensaver, status animation, agent notifications, session launchers
+for tmux and Rex).
 Managed with [GNU Stow](https://www.gnu.org/software/stow/). Claude Code and Codex
 config live in a separate private repo.
 
@@ -21,7 +22,7 @@ git clone https://github.com/spencerrlongg/dotfiles ~/dotfiles
 | `brew` | Homebrew |
 | `repos` | signs in to `gh`, clones the private repo, turns on the secret-scan hook in both |
 | `bundle` | everything in `Brewfile`, including Mac App Store apps |
-| `tools` | oh-my-zsh, nvm + Node + global npm packages, atuin, bun, Claude Code |
+| `tools` | oh-my-zsh, nvm + Node + global npm packages, atuin, bun, devnull, Claude Code |
 | `link` | stows every package from both repos; files in the way go to `~/.dotfiles-backup/<time>/` |
 | `tmux` | TPM and the plugins in `.tmux.conf` |
 | `macos` | Open in Nvim.app + file associations, LaunchAgents |
@@ -38,6 +39,7 @@ have the lines they need.
 | `tmux` | `.tmux.conf` |
 | `nvim` | `~/.config/nvim/` |
 | `ghostty` | `~/.config/ghostty/config` |
+| `rex` | `~/.config/rex/init.lua` (keybindings, the session menu action) |
 | `term` | cava, btop and fastfetch configs |
 | `aerospace` | `.aerospace.toml` |
 | `bin` | `~/.local/bin` scripts (tmux screensaver, status animation, agent notify, dotfiles-sync, ...) |
