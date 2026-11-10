@@ -1,5 +1,3 @@
-
-
 . "$HOME/.atuin/bin/env"
 
 # Added by LM Studio CLI (lms)

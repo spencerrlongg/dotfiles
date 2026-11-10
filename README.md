@@ -34,7 +34,7 @@ have the lines they need.
 
 | Package | What it links |
 |---|---|
-| `zsh` | `.zshrc`, `.zprofile`, `.bashrc`, `.profile`, `.bash-preexec.sh`, atuin config |
+| `zsh` | `.zshrc`, `.zshenv`, `.zprofile`, `.bashrc`, `.profile`, `.bash-preexec.sh`, `~/.config/zsh/` (path, tools, aliases), atuin config |
 | `git` | `.gitconfig`, `.huskyrc`, `~/.config/git/` (global ignore, secret-scan hooks) |
 | `tmux` | `.tmux.conf` |
 | `nvim` | `~/.config/nvim/` |
