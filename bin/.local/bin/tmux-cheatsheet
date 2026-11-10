@@ -52,6 +52,7 @@ RIGHT='## Panes
 % | Split left / right
 " | Split top / bottom
 arrows | Move to pane in that direction
+C-h/j/k/l | Move to pane (vim directions)
 o | Next pane
 ; | Last pane
 q | Show numbers, type one to jump
