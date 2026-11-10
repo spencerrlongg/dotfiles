@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# tmux-showcase: build the "showcase" session, a window of animations to look at.
-# Safe to run more than once; it does nothing if the session already exists.
-# Switch to it with prefix + V.
+# tmux-showcase: build the showcase, a window of animations to look at, as window 2
+# ("garden") of the home session. Safe to run more than once; it does nothing if
+# home already has a garden window. Switch to it with prefix + V.
 #
 #   ┌──────────────┬─────────┐
 #   │   cbonsai    │tty-clock│
@@ -21,10 +21,18 @@ BTOP_MIN_HEIGHT=24
 CLOCK_MIN_WIDTH=56
 CLOCK_MIN_HEIGHT=9
 
+# Where the showcase lives. If the home session doesn't exist yet, it is created
+# with the showcase as its only window. If window 2 is taken, the showcase takes
+# the next free index.
+SESSION=home
+WINDOW=garden
+INDEX=2
+W="$SESSION:$WINDOW"
+
 apply_layout() {
   local stats clock window_width window_height
-  stats=$(tmux show -t showcase -v @showcase_stats)
-  clock=$(tmux show -t showcase -v @showcase_clock)
+  stats=$(tmux show -w -t "$W" -v @showcase_stats)
+  clock=$(tmux show -w -t "$W" -v @showcase_clock)
   read -r window_width window_height < <(tmux display -p -t "$stats" '#{window_width} #{window_height}')
 
   local stats_height=$(( window_height * 43 / 100 ))
@@ -50,22 +58,21 @@ TEXT_DIM='#a6a69c'
 # Each pane gets a title tab on its top border, e.g. ──┤ 盆栽 bonsai ├────
 # The active pane's lines and label are brighter.
 apply_style() {
-  local w=showcase:garden
   local line="#{?pane_active,#[fg=$ACTIVE],#[fg=$LINE]}"
   local text="#{?pane_active,#[fg=$TEXT]#[bold],#[fg=$TEXT_DIM]}"
-  tmux set -w -t "$w" pane-border-lines single
-  tmux set -w -t "$w" pane-border-status top
-  tmux set -w -t "$w" pane-border-style "fg=$LINE"
-  tmux set -w -t "$w" pane-active-border-style "fg=$ACTIVE"
-  tmux set -w -t "$w" pane-border-format \
+  tmux set -w -t "$W" pane-border-lines single
+  tmux set -w -t "$W" pane-border-status top
+  tmux set -w -t "$W" pane-border-style "fg=$LINE"
+  tmux set -w -t "$W" pane-active-border-style "fg=$ACTIVE"
+  tmux set -w -t "$W" pane-border-format \
     "${line}──┤ #[fg=$KANJI]#{@showcase_kanji} ${text}#{@showcase_label}#[nobold] ${line}├"
 
   # Labels live in pane options, so programs that set the pane title can't change them
   label() { tmux set -p -t "$1" @showcase_kanji "$2"; tmux set -p -t "$1" @showcase_label "$3"; }
-  label "$(tmux show -t showcase -v @showcase_tree)"  '盆栽' bonsai
-  label "$(tmux show -t showcase -v @showcase_clock)" '時計' clock
-  label "$(tmux show -t showcase -v @showcase_wave)"  '浪裏' wave
-  label "$(tmux show -t showcase -v @showcase_stats)" '監視' btop
+  label "$(tmux show -w -t "$W" -v @showcase_tree)"  '盆栽' bonsai
+  label "$(tmux show -w -t "$W" -v @showcase_clock)" '時計' clock
+  label "$(tmux show -w -t "$W" -v @showcase_wave)"  '浪裏' wave
+  label "$(tmux show -w -t "$W" -v @showcase_stats)" '監視' btop
 }
 
 if [[ $1 == --layout ]]; then
@@ -78,21 +85,33 @@ if [[ $1 == --style ]]; then
   exit 0
 fi
 
-tmux has-session -t showcase 2>/dev/null && exit 0
+tmux list-windows -t "=$SESSION" -F '#{window_name}' 2>/dev/null | grep -qxF "$WINDOW" && exit 0
 
-# Detached sessions start at 80x24; give it a real size so the splits come out
-# proportioned, and tmux resizes it to the client on switch (window-size latest)
-tree=$(tmux new-session -d -s showcase -n garden -x 220 -y 60 -c "$HOME" -P -F '#{pane_id}')
+if tmux has-session -t "=$SESSION" 2>/dev/null; then
+  # -d keeps the client on its current window; prefix + V switches afterwards
+  tree=$(tmux new-window -d -t "=$SESSION:$INDEX" -n "$WINDOW" -c "$HOME" -P -F '#{pane_id}' 2>/dev/null ||
+    tmux new-window -d -t "=$SESSION:" -n "$WINDOW" -c "$HOME" -P -F '#{pane_id}')
+else
+  tree=$(tmux new-session -d -s "$SESSION" -n "$WINDOW" -c "$HOME" -P -F '#{pane_id}')
+fi
+
+# A window in a detached session starts at 80x24. Give it a real size so the
+# splits come out proportioned. resize-window sets the window's window-size to
+# manual, so unset it afterwards and tmux resizes the window to the client when
+# it's shown (window-size latest).
+tmux resize-window -t "$tree" -x 220 -y 60
 stats=$(tmux split-window -v -t "$tree" -l 43% -c "$HOME" -P -F '#{pane_id}')
 clock=$(tmux split-window -h -t "$tree" -l 36% -c "$HOME" -P -F '#{pane_id}')
 wave=$(tmux split-window -v -t "$clock" -l 65% -c "$HOME" -P -F '#{pane_id}')
+tmux set -w -u -t "$tree" window-size
 
-tmux set -t showcase @showcase_tree "$tree"
-tmux set -t showcase @showcase_stats "$stats"
-tmux set -t showcase @showcase_clock "$clock"
-tmux set -t showcase @showcase_wave "$wave"
+# Pane IDs are window options, so --layout and --style find them wherever the window is
+tmux set -w -t "$tree" @showcase_tree "$tree"
+tmux set -w -t "$tree" @showcase_stats "$stats"
+tmux set -w -t "$tree" @showcase_clock "$clock"
+tmux set -w -t "$tree" @showcase_wave "$wave"
 apply_style
-tmux set-hook -w -t showcase:garden window-resized 'run-shell -b "~/.local/bin/tmux-showcase --layout"'
+tmux set-hook -w -t "$tree" window-resized 'run-shell -b "~/.local/bin/tmux-showcase --layout"'
 
 # Started with send-keys (like tmux-start) so quitting one leaves a shell behind
 tmux send-keys -t "$tree"  'clear && cbonsai -l -i -w 6 -M 4' Enter

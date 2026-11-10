@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # tmux-start — restore dev session layout
-# Sessions, in picker order: showcase, root-claude, snipe-mobile, servers, snipe-it
+# Sessions, in picker order: home, snipe-mobile, servers, snipe-it
+# (the showcase is window 2 of home, built by tmux-showcase)
 # Created in that order so tmux's session ids ($0, $1, ...) follow it too.
 
 set -e
@@ -15,12 +16,12 @@ fi
 # the window
 NVIM_PROJECT="$HOME/.local/bin/nvim-project"
 
-# --- showcase (animations; also what prefix + V builds) ---
+# --- home: claude, devnull, and the showcase (animations; also what prefix + V builds) ---
+tmux new-session -d -s home -c /Users/spencer -n claude
+tmux send-keys  -t home:0   'claude' Enter
+tmux new-window    -t home  -c /Users/spencer  -n devnull
+tmux send-keys  -t home:1   'devnull' Enter
 ~/.local/bin/tmux-showcase
-
-# --- root-claude ---
-tmux new-session -d -s root-claude -c /Users/spencer -n claude
-tmux send-keys  -t root-claude:0   'claude' Enter
 
 # --- snipe-mobile ---
 tmux new-session -d -s snipe-mobile -c /Users/spencer/dev/snipe-it-mobile -n claude
@@ -39,4 +40,4 @@ tmux send-keys  -t snipe-it:0     'claude' Enter
 tmux new-window    -t snipe-it    -c /Users/spencer/dev/snipe-it         -n nvim "$NVIM_PROJECT"
 
 # Open on the showcase
-tmux attach -t showcase
+tmux attach -t home:garden

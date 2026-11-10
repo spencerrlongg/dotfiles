@@ -17,7 +17,7 @@ OFF=$'\033[0m'
 # Session order. tmux itself always lists sessions alphabetically, so the picker
 # sorts them: TOP first in this order, then any others in tmux's order, then BOTTOM.
 # Sessions that aren't running are skipped. The first ten get digit hotkeys 0-9.
-TOP=(showcase root-claude snipe-mobile)
+TOP=(home snipe-mobile)
 BOTTOM=(claude-workspace)
 
 RUNNING=()

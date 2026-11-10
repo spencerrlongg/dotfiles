@@ -21,7 +21,7 @@ GAP="    "
 LEFT='## Sessions
 j | Picker: every session and window
 Tab | Last session
-R S W A | Go to root-claude/servers/web/app
+R S W A | Go to home/servers/web/app
 ( ) | Previous / next session
 s | Session tree
 $ | Rename session
@@ -75,7 +75,7 @@ q | Leave copy mode
 
 ## Extras
 N | Jump to oldest agent notification
-V | Showcase session (animations)
+V | Showcase window (home, animations)
 B | Screensaver (j/k switch, qq quit)
 v | Audio visualizer (q closes)
 a | Status animation (koi/petals/moon/bonsai)'
