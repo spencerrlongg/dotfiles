@@ -31,5 +31,11 @@ nvm() {
 export BUN_INSTALL=$HOME/.bun
 path=($BUN_INSTALL/bin $path)
 
+# Rex's CLI lives inside the app. Rex adds it to PATH only in its own panes, so
+# Ghostty and tmux shells need it here.
+REX_BIN="/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS"
+[[ -x $REX_BIN/rex ]] && path+=("$REX_BIN")
+unset REX_BIN
+
 # Scripts from the dotfiles bin package, ahead of everything
 path=($HOME/.local/bin $path)

@@ -7,7 +7,10 @@
 
 set -euo pipefail
 
-command -v rex >/dev/null || { echo "rex not found on PATH" >&2; exit 1; }
+# Rex puts its CLI on PATH only in its own panes; elsewhere, use the app's copy
+REX_APP_BIN="/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS"
+command -v rex >/dev/null || PATH="$PATH:$REX_APP_BIN"
+command -v rex >/dev/null || { echo "rex not found on PATH or in $REX_APP_BIN" >&2; exit 1; }
 command -v jq  >/dev/null || { echo "jq not found on PATH" >&2; exit 1; }
 
 # nvim windows run nvim-project as the window's own command (not typed into a
