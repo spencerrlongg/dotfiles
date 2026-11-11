@@ -92,6 +92,18 @@ if ! has_session snipe-it; then
   rex window new -s "$s" nvim -c "$dir" --focus=false -- "$NVIM_PROJECT" >/dev/null
 fi
 
+# Session order: Rex lists sessions (sidebar, rex ls, number keys) in an order it
+# keeps, and new ones go last. Sessions that already existed keep their old spot, so
+# put these four first, in this order, on every run. Any other sessions follow them.
+order=(home snipe-mobile servers snipe-it)
+i=1
+for label in "${order[@]}"; do
+  id=$(rex ls --json | jq -r --arg l "$label" '.sessions[] | select(.label == $l) | .session_id' | head -n1)
+  [[ -n $id ]] || continue
+  rex session move "$id" --index "$i" >/dev/null
+  i=$(( i + 1 ))
+done
+
 # Open on home's garden window in the Rex app (works when exactly one Rex app is
 # connected; pass REX_CLIENT=<label> to pick one when several are)
 home_session=$(rex ls --json | jq -r '.sessions[] | select(.label == "home") | .session_id' | head -n1)
