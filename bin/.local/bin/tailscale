@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# tailscale: the Tailscale CLI. The Mac App Store build ships it inside the app bundle
+# and doesn't install it on PATH; exec'ing it (instead of a symlink to it) keeps the
+# binary's own path, which it uses to run as the CLI rather than the GUI.
+exec /Applications/Tailscale.app/Contents/MacOS/Tailscale "$@"
