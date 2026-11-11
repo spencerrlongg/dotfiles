@@ -61,7 +61,80 @@ rex.action{
   end,
 }
 
+-- Agent jump (tmux: prefix + N, tmux-agent-notify jump): go to the oldest pane whose
+-- agent finished or is waiting for you. Claude Code reports its state to Rex itself
+-- (Program Status: working, idle, blocked, error, done). Rex doesn't tell the server
+-- which pane you're looking at, so "seen" is tracked here: a report counts as seen
+-- once this jump has taken you to it, or when you press the key from that pane. A
+-- new report (the agent ran again) makes the pane count again.
+local AGENT_SEEN = os.getenv("HOME") .. "/.local/state/rex-agent-seen.json"
+local URGENCY = { blocked = 3, error = 2, done = 1, idle = 1 }
+
+rex.action{
+  name = "agent_jump",
+  title = "Go to Waiting Agent",
+  description = "Show the oldest pane whose agent finished or needs input, as tmux's prefix + N does.",
+  run = function(ctx)
+    local seen = {}
+    local f = io.open(AGENT_SEEN)
+    if f then
+      local ok, t = pcall(rex.json.decode, f:read("*a"))
+      f:close()
+      if ok and type(t) == "table" then seen = t end
+    end
+
+    local T = "com.superlogical.terminal"
+    local candidates, alive = {}, {}
+    for _, s in ipairs(rex.call("session.list").sessions) do
+      local att = rex.call("session.attach", { session_id = s.session_id })
+      for _, w in ipairs(att and att.view and att.view.windows or {}) do
+        local function walk(node)
+          if not node then return end
+          if node.block_id then
+            local st = rex.block.call(T, "program_status", { session_id = s.session_id, block_id = node.block_id })
+            local records = st and st.records or {}
+            local busy, best, stamp = false, 0, ""
+            for _, r in ipairs(records) do
+              if r.state == "working" then busy = true end
+              best = math.max(best, URGENCY[r.state] or 0)
+              if r.updated_at > stamp then stamp = r.updated_at end
+            end
+            if #records > 0 then alive[node.block_id] = stamp end
+            if not busy and best > 0 then
+              candidates[#candidates + 1] = { sid = s.session_id, wid = w.window_id, bid = node.block_id, stamp = stamp }
+            end
+          end
+          if node.split then walk(node.split.before); walk(node.split.after) end
+        end
+        for _, layer in ipairs(w.layers or {}) do walk(layer.layout) end
+      end
+    end
+
+    -- The pane you pressed the key in counts as seen
+    if ctx.block_id and alive[ctx.block_id] then seen[ctx.block_id] = alive[ctx.block_id] end
+
+    local target
+    for _, c in ipairs(candidates) do
+      if c.bid ~= ctx.block_id and seen[c.bid] ~= c.stamp and (not target or c.stamp < target.stamp) then
+        target = c
+      end
+    end
+
+    -- Keep only panes that still exist
+    local keep = {}
+    for bid, stamp in pairs(seen) do if alive[bid] then keep[bid] = stamp end end
+    if target then keep[target.bid] = target.stamp end
+    f = io.open(AGENT_SEEN, "w")
+    if f then f:write(rex.json.encode(keep)); f:close() end
+
+    if not target then error("No agent notifications") end
+    rex.call("session.focus_block", { session_id = target.sid, block_id = target.bid })
+    rex.client.queue("session.select", { session_id = target.sid, window_id = target.wid })
+  end,
+}
+
 -- --- Sessions (tmux: switch-client, choose-tree) -----------------------------------
+rex.bind(P .. "shift+n", "agent_jump")
 rex.bind(P .. "j", "session_menu")
 rex.bind("cmd+k", "session_menu")
 rex.bind(P .. "w", "session_menu")                -- tmux: choose-tree -Zw
