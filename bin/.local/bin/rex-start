@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # rex-start — restore the dev session layout in Rex (the Rex version of tmux-start)
-# Sessions, in picker order: home, snipe-mobile, servers, snipe-it
+# Sessions, in picker order: home, snipe-mobile, snipe-it
 # (the showcase is window 3, "garden", of home, like tmux-start + tmux-showcase)
 # Created in that order. A session whose label already exists is skipped, and so is
 # home's garden window, so the script is safe to run again after closing one of them.
+#
+# Dev servers run in their project's session, in a minimized floating layer on the
+# first tab whose panes are labeled "server: NAME" (ctrl+a f shows or hides them; see
+# servers_toggle in ~/.config/rex/init.lua). A session that has no server panes gets
+# them, even when the session itself already existed.
 
 set -euo pipefail
 
@@ -38,6 +43,60 @@ type_cmd() {
 new_session() {
   rex new "$1" -c "$2" --window "$3" --json |
     jq -er '"\(.session_id) \(.initial_windows[0].block_ids[0])"'
+}
+
+# add_servers SESSION_LABEL "NAME|DIR|COMMAND" ["NAME|DIR|COMMAND"]
+# Opens one floating layer in the bottom right of the session's first tab with a pane
+# per server (two are stacked, the second one short), types each command, then
+# minimizes the layer. Skipped when the session already has a "server: " pane.
+add_servers() {
+  local label=$1; shift
+  local s
+  s=$(rex ls --json | jq -er --arg l "$label" '.sessions[] | select(.label == $l) | .session_id' | head -n1)
+  rex block ls -s "$s" --json | jq -e '.blocks[] | select(.label | startswith("server: "))' >/dev/null && return
+  local names=() dirs=() cmds=() spec
+  for spec in "$@"; do
+    IFS='|' read -r n d c <<<"$spec"
+    names+=("$n"); dirs+=("$d"); cmds+=("$c")
+  done
+  rex do - session="$s" names="${names[*]}" dirs="${dirs[*]}" >/dev/null <<'LUA'
+local SH = "com.superlogical.terminal.shell"
+local names, dirs = {}, {}
+for n in rex.args.names:gmatch("%S+") do names[#names + 1] = n end
+for d in rex.args.dirs:gmatch("%S+") do dirs[#dirs + 1] = d end
+local function pane(i) return { block = { flavor = SH, label = "server: " .. names[i], options = { cwd = dirs[i] } } } end
+local layout = pane(1)
+if #names == 2 then
+  layout = { split = { direction = "vertical", ratio = 0.78, before = pane(1), after = pane(2) } }
+end
+local view = rex.call("session.attach", { session_id = rex.args.session }).view
+rex.call("session.new_layer", { session_id = rex.args.session, window_id = view.windows[1].window_id,
+  bounds = { 0.5, 0.45, 0.49, 0.53 }, layout = layout })
+LUA
+  local i b
+  for i in "${!names[@]}"; do
+    b=$(rex block ls -s "$s" --json | jq -er --arg l "server: ${names[$i]}" '.blocks[] | select(.label == $l) | .block_id' | head -n1)
+    type_cmd "$s" "$b" "clear && ${cmds[$i]}"
+  done
+  rex do - session="$s" >/dev/null <<'LUA'
+local s = rex.args.session
+local view = rex.call("session.attach", { session_id = s }).view
+local server = {}
+for _, b in ipairs(rex.call("session.list_blocks", { session_id = s }).blocks or {}) do
+  if (b.label or ""):sub(1, 8) == "server: " then server[b.block_id] = true end
+end
+local function has_server(node)
+  if node.block_id then return server[node.block_id] end
+  return node.split and (has_server(node.split.before) or has_server(node.split.after))
+end
+for _, w in ipairs(view.windows) do
+  for _, l in ipairs(w.layers) do
+    if l.kind == "floating" and has_server(l.layout) then
+      rex.call("session.set_layer_state", { session_id = s, layer_id = l.layer_id, state = "minimized" })
+    end
+  end
+end
+LUA
 }
 
 # --- home: claude, devnull, and garden (the showcase; Rex version of tmux-showcase) ---
@@ -77,15 +136,10 @@ if ! has_session snipe-mobile; then
   type_cmd "$s" "$b" 'claude'
   rex window new -s "$s" nvim -c "$dir" --focus=false -- "$NVIM_PROJECT" >/dev/null
 fi
-
-# --- servers ---
-if ! has_session servers; then
-  read -r s b < <(new_session servers "$HOME/dev/snipe-it" ngrok)
-  type_cmd "$s" "$b" 'ngrok start snipe-it'
-  node=$(rex window new -s "$s" node -c "$HOME/dev/snipe-it-mobile" --focus=false --json |
-    jq -er '.block_ids[0]')
-  type_cmd "$s" "$node" 'EXPO_UNSTABLE_MCP_SERVER=1 npx expo start'
-fi
+# tailscale serve shares Expo (port 8081) over the tailnet
+add_servers snipe-mobile \
+  "expo|$HOME/dev/snipe-it-mobile|EXPO_UNSTABLE_MCP_SERVER=1 npx expo start" \
+  "tailscale|$HOME|tailscale serve 8081"
 
 # --- snipe-it ---
 if ! has_session snipe-it; then
@@ -94,11 +148,12 @@ if ! has_session snipe-it; then
   type_cmd "$s" "$b" 'claude'
   rex window new -s "$s" nvim -c "$dir" --focus=false -- "$NVIM_PROJECT" >/dev/null
 fi
+add_servers snipe-it "ngrok|$HOME/dev/snipe-it|ngrok start snipe-it"
 
 # Session order: Rex lists sessions (sidebar, rex ls, number keys) in an order it
 # keeps, and new ones go last. Sessions that already existed keep their old spot, so
-# put these four first, in this order, on every run. Any other sessions follow them.
-order=(home snipe-mobile servers snipe-it)
+# put these three first, in this order, on every run. Any other sessions follow them.
+order=(home snipe-mobile snipe-it)
 i=1
 for label in "${order[@]}"; do
   id=$(rex ls --json | jq -r --arg l "$label" '.sessions[] | select(.label == $l) | .session_id' | head -n1)

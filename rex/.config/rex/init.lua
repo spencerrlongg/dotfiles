@@ -9,7 +9,7 @@ rex.bind(P .. "ctrl+a", "pane.send_key", { key = "ctrl+a" })
 
 -- --- Actions ---------------------------------------------------------------------
 
--- Show a session by label, optionally on a tab by label. R S W A V below use it, like
+-- Show a session by label, optionally on a tab by label. R W A V below use it, like
 -- tmux's switch-client -t home and switch-client -t home:garden.
 rex.action{
   name = "goto_session",
@@ -58,6 +58,93 @@ rex.action{
       },
     }
     if err then error(err) end
+  end,
+}
+
+-- Server toggle: each project session keeps its dev servers (expo, ngrok, ...) in one
+-- floating layer whose panes are labeled "server: NAME". Rex floating layers belong to
+-- one tab, so the toggle follows you: on the layer's own tab it minimizes or restores
+-- it; on another tab it moves the panes over (they keep running) and shows them there.
+local SERVER_PREFIX = "server:"
+
+rex.action{
+  name = "servers_toggle",
+  title = "Toggle Servers",
+  description = "Show this session's floating server panes over the current tab, or hide them.",
+  run = function(ctx)
+    local sid = ctx.session_id
+    local view = rex.call("session.attach", { session_id = sid }).view
+    local labels = {}
+    for _, b in ipairs(rex.call("session.list_blocks", { session_id = sid }).blocks or {}) do
+      labels[b.block_id] = b.label or ""
+    end
+    local function leaves(node, out)
+      out = out or {}
+      if node.block_id then out[#out + 1] = node.block_id end
+      if node.split then leaves(node.split.before, out); leaves(node.split.after, out) end
+      return out
+    end
+
+    -- Find the server layer, the tab you're on, and that tab's tiled pane to anchor on
+    local srv, srv_win, cur_win, anchor
+    for _, w in ipairs(view.windows or {}) do
+      for _, layer in ipairs(w.layers or {}) do
+        local ids = leaves(layer.layout)
+        for _, id in ipairs(ids) do
+          if id == ctx.block_id then cur_win = w end
+          if layer.kind == "floating" and labels[id]:sub(1, #SERVER_PREFIX) == SERVER_PREFIX then
+            srv, srv_win = layer, w
+          end
+        end
+      end
+    end
+    if not srv then error("No server panes in this session (labels starting with \"" .. SERVER_PREFIX .. "\")") end
+    cur_win = cur_win or srv_win
+    for _, layer in ipairs(cur_win.layers or {}) do
+      if layer.kind == "tiled" then anchor = leaves(layer.layout)[1] end
+    end
+
+    -- Same tab: minimize or restore
+    if cur_win.window_id == srv_win.window_id then
+      if srv.state == "minimized" then
+        rex.call("session.set_layer_state", { session_id = sid, layer_id = srv.layer_id, state = "normal", focus = true })
+      else
+        rex.call("session.set_layer_state", { session_id = sid, layer_id = srv.layer_id, state = "minimized" })
+      end
+      return
+    end
+
+    -- Other tab: move the first pane beside this tab's pane and float it with the same
+    -- bounds, then rebuild the layer's splits around it
+    local first = leaves(srv.layout)[1]
+    rex.call("session.move_block", { session_id = sid, block_id = first, anchor_block_id = anchor })
+    rex.call("session.float_block", { session_id = sid, block_id = first, bounds = srv.bounds })
+    local function rebuild(node)
+      if not node.split then return end
+      rebuild(node.split.before)
+      rex.call("session.move_block", {
+        session_id = sid, block_id = leaves(node.split.after)[1],
+        anchor_block_id = leaves(node.split.before)[1],
+        direction = node.split.direction, ratio = node.split.ratio,
+      })
+      rebuild(node.split.after)
+    end
+    rebuild(srv.layout)
+
+    -- float_block makes a new layer; show it and focus it
+    view = rex.call("session.view", { session_id = sid })
+    for _, w in ipairs(view.windows or {}) do
+      for _, layer in ipairs(w.layers or {}) do
+        if layer.kind == "floating" then
+          for _, id in ipairs(leaves(layer.layout)) do
+            if id == first then
+              rex.call("session.set_layer_state", { session_id = sid, layer_id = layer.layer_id, state = "normal", focus = true })
+              return
+            end
+          end
+        end
+      end
+    end
   end,
 }
 
@@ -140,7 +227,6 @@ rex.bind("cmd+k", "session_menu")
 rex.bind(P .. "w", "session_menu")                -- tmux: choose-tree -Zw
 rex.bind(P .. "s", "session.switch")              -- tmux: choose-tree -Zs (Rex's own picker)
 rex.bind(P .. "shift+r", "goto_session", { label = "home" })
-rex.bind(P .. "shift+s", "goto_session", { label = "servers" })
 rex.bind(P .. "shift+w", "goto_session", { label = "snipe-it" })      -- web
 rex.bind(P .. "shift+a", "goto_session", { label = "snipe-mobile" })  -- app
 rex.bind(P .. "shift+v", "goto_session", { label = "home", tab = "garden" })  -- showcase
@@ -185,5 +271,6 @@ for _, d in ipairs({ "left", "right", "up", "down" }) do
 end
 
 -- --- Other -----------------------------------------------------------------------------
+rex.bind(P .. "f", "servers_toggle")             -- this session's floating servers
 rex.bind(P .. "shift+;", "client.palette.toggle") -- : (tmux command prompt)
 rex.bind(P .. "pageup", "client.scroll.page_up")  -- tmux: copy-mode -u
