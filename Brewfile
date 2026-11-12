@@ -8,6 +8,7 @@
 
 tap "nikitabobko/tap", trusted: true   # AeroSpace
 tap "anomalyco/tap", trusted: true     # opencode
+tap "cameroncooke/axe", trusted: true  # AXe
 
 # --- Shell and terminal --------------------------------------------------------------
 brew "tmux"
@@ -44,6 +45,7 @@ brew "libpq"
 brew "freetds"
 brew "cocoapods"     # React Native / Expo iOS builds
 brew "watchman"
+brew "cameroncooke/axe/axe"   # taps and swipes on iOS simulators from the CLI (no Simulator.app needed)
 brew "rbenv"
 # brew "nginx"       # left over from Valet; Herd runs its own
 brew "anomalyco/tap/opencode-v2"   # OpenCode 2; plain "opencode" in the tap is 1.x

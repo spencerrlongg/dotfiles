@@ -3,6 +3,7 @@
 # Sessions, in picker order: home, snipe-mobile, servers, snipe-it
 # (the showcase is window 2 of home, built by tmux-showcase)
 # Created in that order so tmux's session ids ($0, $1, ...) follow it too.
+# ngrok and Expo are skipped when they're already running (see start_server).
 
 set -e
 
@@ -29,10 +30,21 @@ tmux send-keys  -t snipe-mobile:0   'claude' Enter
 tmux new-window    -t snipe-mobile  -c /Users/spencer/dev/snipe-it-mobile  -n nvim "$NVIM_PROJECT"
 
 # --- servers ---
+# Rex may already be running these (floating "server:" panes, ctrl+a f there): a
+# second ngrok can't claim the same domain and a second Expo would ask for another
+# port. When one is up, its window gets a note instead, and the shell is left ready.
+start_server() {  # TARGET NAME COMMAND CHECK...
+  local target=$1 name=$2 cmd=$3; shift 3
+  if "$@" >/dev/null 2>&1; then
+    tmux send-keys -t "$target" "echo '$name is already running (probably in Rex: ctrl+a f); not started here'" Enter
+  else
+    tmux send-keys -t "$target" "$cmd" Enter
+  fi
+}
 tmux new-session -d -s servers    -c /Users/spencer/dev/snipe-it        -n ngrok
-tmux send-keys  -t servers:0      'ngrok start snipe-it' Enter
+start_server servers:0 ngrok 'ngrok start snipe-it' pgrep -f 'ngrok start snipe-it'
 tmux new-window    -t servers     -c /Users/spencer/dev/snipe-it-mobile  -n node
-tmux send-keys  -t servers:1      'EXPO_UNSTABLE_MCP_SERVER=1 npx expo start' Enter
+start_server servers:1 Expo 'EXPO_UNSTABLE_MCP_SERVER=1 npx expo start' lsof -nP -iTCP:8081 -sTCP:LISTEN
 
 # --- snipe-it ---
 tmux new-session -d -s snipe-it   -c /Users/spencer/dev/snipe-it        -n claude
