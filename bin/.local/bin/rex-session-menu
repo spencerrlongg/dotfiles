@@ -7,9 +7,10 @@
 #
 # Usage: rex-session-menu [CLIENT_ID]   (the Rex app to switch; the action passes it)
 #
-# Speed: one `rex do` Lua call collects, sorts and formats every row, and a second
-# one, started in the background at the same time, writes each tab's preview to a
-# temp file, so moving the cursor reads a file instead of calling rex.
+# Speed: fzf opens right away and reads its rows from one `rex do` Lua call that
+# collects, sorts and formats them, so the menu is drawn before the rows arrive.
+# A second call, started in the background at the same time, writes each tab's
+# preview to a temp file, so moving the cursor reads a file instead of calling rex.
 set -euo pipefail
 
 # The pane starts with the login environment only, which doesn't have Homebrew's bin
@@ -76,8 +77,9 @@ each_window(function(s, w, b)
 end)
 LUA
 
-# Prints the header, then a DIGITS line (session ids for keys 0-9), then one fzf row
-# per tab: session_id<TAB>window_id<TAB>block_id<TAB>colored display text.
+# Writes the session ids for keys 0-9 to DIR/digits, one per line. Prints the header
+# row, then one fzf row per tab: session_id<TAB>window_id<TAB>block_id<TAB>colored
+# display text. The header row has empty ids so fzf shows it with the same --with-nth.
 # Agent state is the most urgent Program Status report in the tab (blocked, error
 # or done); Claude Code reports these to Rex itself.
 read -r -d '' LIST_PART <<'LUA' || true
@@ -132,11 +134,12 @@ end
 local function pad(text, width) return text .. string.rep(" ", width - #text) end
 local bar = DIM .. "│" .. OFF
 
-io.write(HEAD .. "#" .. OFF .. " " .. bar .. " " .. HEAD .. pad("SESSION", ws) .. OFF .. " " .. bar .. " "
-  .. HEAD .. pad("TAB", ww) .. OFF .. "   " .. bar .. " " .. HEAD .. "DIRECTORY" .. OFF .. "\n")
 local digits = {}
 for i, name in ipairs(sessions) do if i <= 10 then digits[#digits + 1] = rows[name][1].sid end end
-io.write("DIGITS\t" .. table.concat(digits, "\t") .. "\n")
+local df = io.open(rex.args.dir .. "/digits", "w")
+if df then df:write(table.concat(digits, "\n") .. "\n"); df:close() end
+io.write("\t\t\t" .. HEAD .. "#" .. OFF .. " " .. bar .. " " .. HEAD .. pad("SESSION", ws) .. OFF .. " " .. bar .. " "
+  .. HEAD .. pad("TAB", ww) .. OFF .. "   " .. bar .. " " .. HEAD .. "DIRECTORY" .. OFF .. "\n")
 for i, name in ipairs(sessions) do
   local num = i <= 10 and tostring(i - 1) or " "
   for _, r in ipairs(rows[name]) do
@@ -153,22 +156,19 @@ LIST_QUERY=$COMMON$'\n'$LIST_PART
 rex do - self="$SELF" dir="$PREVIEWS" lines="$PREVIEW_LINES" <<<"$PREVIEW_QUERY" >/dev/null 2>&1 &
 preview_pid=$!
 
-{
-  IFS= read -r header
-  IFS=$'\t' read -r -a digits
-  rows=$(cat)
-} < <(rex do - self="$SELF" top="$TOP" bottom="$BOTTOM" <<<"$LIST_QUERY")
-
-# One --bind per numbered session: the digit ends fzf with that session and no tab,
-# so the app shows the session's active tab.
+# Digits 0-9 end fzf with that session and no tab, so the app shows the session's
+# active tab. The ids come from the file the list query writes; a digit pressed
+# before it lands, or with no session behind it, does nothing.
 binds=()
-for (( i = 1; i < ${#digits[@]}; i++ )); do
-  binds+=(--bind "$(( i - 1 )):become(printf '%s\t\n' '${digits[$i]}')")
+for i in 0 1 2 3 4 5 6 7 8 9; do
+  binds+=(--bind "$i:transform:sid=\$(sed -n '$(( i + 1 ))p' '$PREVIEWS/digits' 2>/dev/null); [ -n \"\$sid\" ] && echo \"become(echo \$sid)\"")
 done
 
-# Preview from the file the background query wrote; until it lands, ask rex directly
+# Rows stream in from the list query (process substitution, so a digit picked before
+# it finishes doesn't fail the pipeline). Preview from the file the background query
+# wrote; until it lands, ask rex directly.
 picked=$(
-  fzf ${binds[@]+"${binds[@]}"} <<<"$rows" \
+  fzf "${binds[@]}" < <(rex do - self="$SELF" dir="$PREVIEWS" top="$TOP" bottom="$BOTTOM" <<<"$LIST_QUERY") \
     --no-input \
     --bind 'j:down,k:up' \
     --bind '/:show-input+unbind(j,k,/)' \
@@ -182,7 +182,7 @@ picked=$(
     --info=inline \
     --prompt='  ' \
     --pointer='▸' \
-    --header="$header" \
+    --header-lines=1 \
     --color='fg:#c5c9c5,bg:-1,hl:#ffa066,fg+:#c5c9c5,bg+:#282727,hl+:#ffa066' \
     --color='info:#737c73,prompt:#98bb6c,pointer:#ffa066,border:#625e5a,header:#737c73' \
     --preview="[[ -n {3} ]] || exit 0; cat '$PREVIEWS'/{3} 2>/dev/null || rex capture -s {1} -b {3} --format=vt --trim | tail -n $PREVIEW_LINES" \
