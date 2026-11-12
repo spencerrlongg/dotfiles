@@ -3,11 +3,14 @@
 # Runs in a floating pane opened by the session_menu action in ~/.config/rex/init.lua
 # (cmd+k and ctrl+a > j). Opens in navigation mode: j/k move, Enter picks, 0-9 jump
 # straight to the numbered session. / switches to search (typing filters, j/k type
-# letters); Esc goes back to navigation, and Esc again closes the pane.
+# letters); Esc goes back to navigation, and Esc again closes the menu.
 #
 # Usage: rex-session-menu [CLIENT_ID]   (the Rex app to switch; the action passes it)
 #
-# Speed: fzf opens right away and reads its rows from one `rex do` Lua call that
+# Speed: the pane stays open. After a pick or Esc it blanks itself, minimizes its
+# floating layer and waits; the action shows the layer again and types the client id
+# and Return into it, which starts the next menu. That skips starting a new pane each
+# time. fzf opens right away and reads its rows from one `rex do` Lua call that
 # collects, sorts and formats them, so the menu is drawn before the rows arrive.
 # A second call, started in the background at the same time, writes each tab's
 # preview to a temp file, so moving the cursor reads a file instead of calling rex.
@@ -26,9 +29,9 @@ PREVIEW_LINES=80
 TOP="home snipe-mobile"
 BOTTOM="claude-workspace"
 
-PREVIEWS=$(mktemp -d "${TMPDIR:-/tmp}/rex-session-menu.XXXXXX")
+PREVIEWS=
 preview_pid=
-trap 'kill "$preview_pid" 2>/dev/null || true; rm -rf "$PREVIEWS"' EXIT
+trap 'kill "$preview_pid" 2>/dev/null || true; [[ -z $PREVIEWS ]] || rm -rf "$PREVIEWS"' EXIT
 
 # Shared Lua: every block in a window (layouts and floating layers hold split trees),
 # and the tab's pane to show: its focused one, or another if that's this picker.
@@ -153,13 +156,34 @@ LUA
 PREVIEW_QUERY=$COMMON$'\n'$PREVIEW_PART
 LIST_QUERY=$COMMON$'\n'$LIST_PART
 
+# Minimizes the floating layer that holds this pane
+read -r -d '' HIDE_QUERY <<'LUA' || true
+local function has(node)
+  if node.block_id then return node.block_id == rex.args.self end
+  return node.split and (has(node.split.before) or has(node.split.after))
+end
+for _, s in ipairs(rex.call("session.list").sessions) do
+  local att = rex.call("session.attach", { session_id = s.session_id })
+  for _, w in ipairs(att and att.view and att.view.windows or {}) do
+    for _, l in ipairs(w.layers or {}) do
+      if l.kind == "floating" and has(l.layout) then
+        rex.call("session.set_layer_state", { session_id = s.session_id, layer_id = l.layer_id, state = "minimized" })
+        return
+      end
+    end
+  end
+end
+LUA
+
+run_menu() {
+PREVIEWS=$(mktemp -d "${TMPDIR:-/tmp}/rex-session-menu.XXXXXX")
 rex do - self="$SELF" dir="$PREVIEWS" lines="$PREVIEW_LINES" <<<"$PREVIEW_QUERY" >/dev/null 2>&1 &
 preview_pid=$!
 
 # Digits 0-9 end fzf with that session and no tab, so the app shows the session's
 # active tab. The ids come from the file the list query writes; a digit pressed
 # before it lands, or with no session behind it, does nothing.
-binds=()
+local binds=() i picked sid wid err
 for i in 0 1 2 3 4 5 6 7 8 9; do
   binds+=(--bind "$i:transform:sid=\$(sed -n '$(( i + 1 ))p' '$PREVIEWS/digits' 2>/dev/null); [ -n \"\$sid\" ] && echo \"become(echo \$sid)\"")
 done
@@ -187,11 +211,14 @@ picked=$(
     --color='info:#737c73,prompt:#98bb6c,pointer:#ffa066,border:#625e5a,header:#737c73' \
     --preview="[[ -n {3} ]] || exit 0; cat '$PREVIEWS'/{3} 2>/dev/null || rex capture -s {1} -b {3} --format=vt --trim | tail -n $PREVIEW_LINES" \
     --preview-window='down,60%,border-top,follow' \
-) || exit 0
+) || picked=
 
-[[ -z $picked ]] && exit 0
+kill "$preview_pid" 2>/dev/null || true
+rm -rf "$PREVIEWS"
+PREVIEWS=
+[[ -z $picked ]] && return 0
 IFS=$'\t' read -r sid wid _ <<<"$picked"
-args=(session_id="$sid")
+local args=(session_id="$sid")
 [[ -n $wid ]] && args+=(window_id="$wid")
 
 # Switch the app that opened the menu, or the one connected app if that client is
@@ -203,3 +230,15 @@ if ! { [[ -n $CLIENT ]] && rex -C "$CLIENT" do session.select "${args[@]}" >/dev
   printf '\n  \033[38;2;255;160;102mCould not switch:\033[0m %s\n\n  Press any key to close.' "$err"
   read -rsn1
 fi
+return 0
+}
+
+# Menu, then blank the screen (so the next show doesn't flash this one), hide, and
+# wait for the action to type the next client id. read -s keeps it off the screen.
+run_menu
+while :; do
+  printf '\033[H\033[2J\033[3J'
+  rex do - self="$SELF" <<<"$HIDE_QUERY" >/dev/null 2>&1 || true
+  IFS= read -rs CLIENT || exit 0
+  run_menu
+done

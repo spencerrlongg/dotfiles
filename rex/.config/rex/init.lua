@@ -38,33 +38,120 @@ rex.action{
   end,
 }
 
+-- --- Floating layers that follow you ------------------------------------------------
+-- Rex floating layers belong to one tab. The session menu and the server panes stay
+-- running in a minimized floating layer, and their keys bring that layer to whichever
+-- tab you're on (the programs keep running through the move).
+
+local function leaves(node, out)
+  out = out or {}
+  if node.block_id then out[#out + 1] = node.block_id end
+  if node.split then leaves(node.split.before, out); leaves(node.split.after, out) end
+  return out
+end
+
+-- Finds the floating layer holding a pane whose label passes match(label), and the
+-- tab you're on (the one with ctx.block_id). Returns view info for both.
+local function find_layer(ctx, match)
+  local sid = ctx.session_id
+  local view = rex.call("session.attach", { session_id = sid }).view
+  local labels = {}
+  for _, b in ipairs(rex.call("session.list_blocks", { session_id = sid }).blocks or {}) do
+    labels[b.block_id] = b.label or ""
+  end
+  local found = {}
+  for _, w in ipairs(view.windows or {}) do
+    for _, layer in ipairs(w.layers or {}) do
+      for _, id in ipairs(leaves(layer.layout)) do
+        if id == ctx.block_id then found.cur_win = w end
+        if layer.kind == "floating" and match(labels[id] or "") then
+          found.layer, found.win, found.block = layer, w, found.block or id
+        end
+      end
+    end
+  end
+  found.cur_win = found.cur_win or found.win
+  return found
+end
+
+-- Moves a floating layer's panes to another tab: the first pane goes beside the tab's
+-- tiled pane and floats with the same bounds, then the splits are rebuilt around it.
+-- Returns the new layer's id.
+local function move_layer(sid, layer, win)
+  local anchor
+  for _, l in ipairs(win.layers or {}) do
+    if l.kind == "tiled" then anchor = leaves(l.layout)[1] end
+  end
+  local first = leaves(layer.layout)[1]
+  rex.call("session.move_block", { session_id = sid, block_id = first, anchor_block_id = anchor })
+  rex.call("session.float_block", { session_id = sid, block_id = first, bounds = layer.bounds })
+  local function rebuild(node)
+    if not node.split then return end
+    rebuild(node.split.before)
+    rex.call("session.move_block", {
+      session_id = sid, block_id = leaves(node.split.after)[1],
+      anchor_block_id = leaves(node.split.before)[1],
+      direction = node.split.direction, ratio = node.split.ratio,
+    })
+    rebuild(node.split.after)
+  end
+  rebuild(layer.layout)
+  for _, w in ipairs(rex.call("session.view", { session_id = sid }).windows or {}) do
+    for _, l in ipairs(w.layers or {}) do
+      if l.kind == "floating" then
+        for _, id in ipairs(leaves(l.layout)) do
+          if id == first then return l.layer_id end
+        end
+      end
+    end
+  end
+end
+
+local function show_layer(sid, layer_id)
+  rex.call("session.set_layer_state", { session_id = sid, layer_id = layer_id, state = "normal", focus = true })
+end
+
 -- Session menu: ~/.local/bin/rex-session-menu (fzf; j/k move, / searches, 0-9 jump)
--- in a floating pane over the current tab. It closes itself when you pick or press Esc.
+-- in a floating pane labeled "session-menu". The first use in a session opens it;
+-- after a pick or Esc the script minimizes it and waits. Later uses show it again
+-- (moving it to this tab) and type the client id and Return, which starts the menu.
+local MENU_LABEL = "session-menu"
+
 rex.action{
   name = "session_menu",
   title = "Session Menu",
   description = "Pick a session or tab with vim keys (j/k, / to search, 0-9 to jump).",
   run = function(ctx)
-    local command = { os.getenv("HOME") .. "/.local/bin/rex-session-menu" }
-    if ctx.client_id then table.insert(command, ctx.client_id) end
-    local _, err = rex.session.new_layer{
-      session_id = ctx.session_id,
-      bounds = { 0.15, 0.1, 0.7, 0.8 },
-      focus = true,
-      layout = rex.layout.block{
-        flavor = "com.superlogical.terminal.shell",
+    local sid = ctx.session_id
+    local m = find_layer(ctx, function(label) return label == MENU_LABEL end)
+    if not m.layer then
+      local command = { os.getenv("HOME") .. "/.local/bin/rex-session-menu" }
+      if ctx.client_id then table.insert(command, ctx.client_id) end
+      rex.call("session.new_layer", {
+        session_id = sid,
+        window_id = m.cur_win and m.cur_win.window_id or nil,
+        bounds = { 0.15, 0.1, 0.7, 0.8 },
+        focus = true,
         -- started directly, skipping the login shell; the script sets its own PATH
-        options = { command = command, shell = "none" },
-      },
-    }
-    if err then error(err) end
+        layout = { block = { flavor = "com.superlogical.terminal.shell", label = MENU_LABEL,
+          options = { command = command, shell = "none" } } },
+      })
+      return
+    end
+    local layer_id = m.layer.layer_id
+    if m.win.window_id ~= m.cur_win.window_id then layer_id = move_layer(sid, m.layer, m.cur_win) end
+    -- Only a minimized menu is waiting for input; an open one is already running fzf
+    if m.layer.state == "minimized" then
+      rex.block.call("com.superlogical.terminal", "write",
+        { session_id = sid, block_id = m.block, data = (ctx.client_id or "") .. "\r" })
+    end
+    show_layer(sid, layer_id)
   end,
 }
 
 -- Server toggle: each project session keeps its dev servers (expo, ngrok, ...) in one
--- floating layer whose panes are labeled "server: NAME". Rex floating layers belong to
--- one tab, so the toggle follows you: on the layer's own tab it minimizes or restores
--- it; on another tab it moves the panes over (they keep running) and shows them there.
+-- floating layer whose panes are labeled "server: NAME". On the layer's own tab the
+-- key minimizes or restores it; on another tab it moves the panes over and shows them.
 local SERVER_PREFIX = "server:"
 
 rex.action{
@@ -73,77 +160,14 @@ rex.action{
   description = "Show this session's floating server panes over the current tab, or hide them.",
   run = function(ctx)
     local sid = ctx.session_id
-    local view = rex.call("session.attach", { session_id = sid }).view
-    local labels = {}
-    for _, b in ipairs(rex.call("session.list_blocks", { session_id = sid }).blocks or {}) do
-      labels[b.block_id] = b.label or ""
-    end
-    local function leaves(node, out)
-      out = out or {}
-      if node.block_id then out[#out + 1] = node.block_id end
-      if node.split then leaves(node.split.before, out); leaves(node.split.after, out) end
-      return out
-    end
-
-    -- Find the server layer, the tab you're on, and that tab's tiled pane to anchor on
-    local srv, srv_win, cur_win, anchor
-    for _, w in ipairs(view.windows or {}) do
-      for _, layer in ipairs(w.layers or {}) do
-        local ids = leaves(layer.layout)
-        for _, id in ipairs(ids) do
-          if id == ctx.block_id then cur_win = w end
-          if layer.kind == "floating" and labels[id]:sub(1, #SERVER_PREFIX) == SERVER_PREFIX then
-            srv, srv_win = layer, w
-          end
-        end
-      end
-    end
-    if not srv then error("No server panes in this session (labels starting with \"" .. SERVER_PREFIX .. "\")") end
-    cur_win = cur_win or srv_win
-    for _, layer in ipairs(cur_win.layers or {}) do
-      if layer.kind == "tiled" then anchor = leaves(layer.layout)[1] end
-    end
-
-    -- Same tab: minimize or restore
-    if cur_win.window_id == srv_win.window_id then
-      if srv.state == "minimized" then
-        rex.call("session.set_layer_state", { session_id = sid, layer_id = srv.layer_id, state = "normal", focus = true })
-      else
-        rex.call("session.set_layer_state", { session_id = sid, layer_id = srv.layer_id, state = "minimized" })
-      end
-      return
-    end
-
-    -- Other tab: move the first pane beside this tab's pane and float it with the same
-    -- bounds, then rebuild the layer's splits around it
-    local first = leaves(srv.layout)[1]
-    rex.call("session.move_block", { session_id = sid, block_id = first, anchor_block_id = anchor })
-    rex.call("session.float_block", { session_id = sid, block_id = first, bounds = srv.bounds })
-    local function rebuild(node)
-      if not node.split then return end
-      rebuild(node.split.before)
-      rex.call("session.move_block", {
-        session_id = sid, block_id = leaves(node.split.after)[1],
-        anchor_block_id = leaves(node.split.before)[1],
-        direction = node.split.direction, ratio = node.split.ratio,
-      })
-      rebuild(node.split.after)
-    end
-    rebuild(srv.layout)
-
-    -- float_block makes a new layer; show it and focus it
-    view = rex.call("session.view", { session_id = sid })
-    for _, w in ipairs(view.windows or {}) do
-      for _, layer in ipairs(w.layers or {}) do
-        if layer.kind == "floating" then
-          for _, id in ipairs(leaves(layer.layout)) do
-            if id == first then
-              rex.call("session.set_layer_state", { session_id = sid, layer_id = layer.layer_id, state = "normal", focus = true })
-              return
-            end
-          end
-        end
-      end
+    local s = find_layer(ctx, function(label) return label:sub(1, #SERVER_PREFIX) == SERVER_PREFIX end)
+    if not s.layer then error("No server panes in this session (labels starting with \"" .. SERVER_PREFIX .. "\")") end
+    if s.win.window_id ~= s.cur_win.window_id then
+      show_layer(sid, move_layer(sid, s.layer, s.cur_win))
+    elseif s.layer.state == "minimized" then
+      show_layer(sid, s.layer.layer_id)
+    else
+      rex.call("session.set_layer_state", { session_id = sid, layer_id = s.layer.layer_id, state = "minimized" })
     end
   end,
 }
