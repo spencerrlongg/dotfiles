@@ -1,10 +1,80 @@
 #!/bin/bash
-# Opens each file given in nvim, in a new window of the tmux session you most recently used.
-# Called by ~/Applications/Open in Nvim.app, which macOS uses as the default app for dev file
-# types (set with duti), so clicking a file link in Ghostty lands here.
-# With no tmux client attached, it opens a new Ghostty window instead.
+# Opens each file given in nvim. Called by ~/Applications/Open in Nvim.app, which macOS
+# uses as the default app for dev file types (set with duti), so clicking a file link
+# in a terminal lands here.
+#
+# Where it opens, first that works:
+#   1. Rex (when Rex.app is connected): a new tab in the session for the file's
+#      project, the one with a pane whose directory is the longest match for the file
+#      (so ~/dev/snipe-it files go to snipe-it, and anything under ~ to home), or the
+#      session Rex last showed. The tab's label is the file name; quitting nvim closes it.
+#      Then Rex.app switches to that session (needs Remote Control on) and comes forward.
+#   2. tmux: a new window in the session you most recently used.
+#   3. A new Ghostty window.
+#
+# The app runs this with a bare PATH, so tools are found by full path or added here.
+REX_APP_BIN="/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS"
+export PATH="/opt/homebrew/bin:$REX_APP_BIN:/usr/bin:/bin"
 TMUX_BIN=/opt/homebrew/bin/tmux
 NVIM_BIN=/opt/homebrew/bin/nvim
+
+[ $# -gt 0 ] || exit 0
+
+# Prints the session id for a file: the session with a pane whose directory is the
+# longest prefix of the file's directory, else the one Rex.app last showed.
+rex_session_for() {
+  rex do - file="$1" last="$2" <<'LUA'
+local T = "com.superlogical.terminal"
+local file, best, best_len = rex.args.file, nil, -1
+for _, s in ipairs(rex.call("session.list").sessions) do
+  local att = rex.call("session.attach", { session_id = s.session_id })
+  local function walk(node)
+    if not node then return end
+    if node.block_id then
+      local p = rex.block.call(T, "pwd", { session_id = s.session_id, block_id = node.block_id })
+      local dir = p and p.pwd and p.pwd:gsub("^file://[^/]*", ""):gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end):gsub("/+$", "")
+      if dir and (file:sub(1, #dir + 1) == dir .. "/") and #dir > best_len then
+        best, best_len = s.session_id, #dir
+      end
+    end
+    if node.split then walk(node.split.before); walk(node.split.after) end
+  end
+  for _, w in ipairs(att and att.view and att.view.windows or {}) do
+    for _, layer in ipairs(w.layers or {}) do walk(layer.layout) end
+  end
+end
+return best or (rex.args.last ~= "" and rex.args.last) or ""
+LUA
+}
+
+# Rex.app's last shown session, from its preferences
+rex_last_session() {
+  defaults export com.superlogical.rex - 2>/dev/null | /usr/bin/python3 -c '
+import json, plistlib, sys
+v = plistlib.loads(sys.stdin.buffer.read()).get("Workspace.lastFocusedSession")
+print(json.loads(v).get("sessionID", "") if v else "")' 2>/dev/null
+}
+
+if command -v rex >/dev/null &&
+   rex client ls --json 2>/dev/null | jq -e '.clients[] | select(.info.kind == "app")' >/dev/null; then
+  last=$(rex_last_session)
+  sid=
+  for file in "$@"; do
+    sid=$(rex_session_for "$file" "$last" | tr -d '"')
+    [ -n "$sid" ] || break
+    # Rex runs the command in a login (not interactive) zsh environment, where macOS's
+    # path_helper has put /usr/bin ahead of Homebrew, so nvim would get Apple's git.
+    # The wrapper puts Homebrew first again.
+    rex window new -s "$sid" "$(basename "$file")" -c "$(dirname "$file")" -- \
+      /bin/zsh -c 'path=(/opt/homebrew/bin /opt/homebrew/sbin $path); exec nvim "$1"' zsh "$file" \
+      >/dev/null || { sid=; break; }
+  done
+  if [ -n "$sid" ]; then
+    rex do session.select session_id="$sid" >/dev/null 2>&1
+    open -a "Rex Beta"
+    exit 0
+  fi
+fi
 
 session=$("$TMUX_BIN" list-clients -F '#{client_activity} #{client_session}' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
 
