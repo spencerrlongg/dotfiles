@@ -18,6 +18,7 @@ brew "fd"
 brew "ripgrep"
 brew "lazygit"
 brew "gh"
+brew "git"           # Apple's /usr/bin/git lags behind on security fixes
 brew "jj"
 brew "stow"
 brew "gitleaks"      # global pre-commit secret scan (~/.config/git/secret-scan)
@@ -40,7 +41,7 @@ brew "pipes-sh"
 brew "tty-clock"
 
 # --- Development -----------------------------------------------------------------------
-brew "mysql", restart_service: :changed   # Snipe-IT
+brew "mysql@9.7", restart_service: :changed   # Snipe-IT (versioned formula since 2026-11)
 brew "libpq"
 brew "freetds"
 brew "cocoapods"     # React Native / Expo iOS builds
