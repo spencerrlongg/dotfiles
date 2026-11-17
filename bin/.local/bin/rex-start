@@ -9,8 +9,21 @@
 # first tab whose panes are labeled "server: NAME" (ctrl+a f shows or hides them; see
 # servers_toggle in ~/.config/rex/init.lua). A session that has no server panes gets
 # them, even when the session itself already existed.
+#
+# rex-start --fresh (or -f) kills home, snipe-mobile and snipe-it first and builds
+# them again, for when their programs are gone (a Rex server update or restart
+# leaves the layouts but not the processes). Other sessions are left alone. Run from
+# a pane in one of those sessions, it finishes in the background, because killing
+# the session closes the pane it was started from; output goes to $TMPDIR/rex-start.log.
 
 set -euo pipefail
+
+fresh=false
+case "${1:-}" in
+  -f|--fresh) fresh=true ;;
+  "") ;;
+  *) echo "usage: rex-start [--fresh]" >&2; exit 2 ;;
+esac
 
 # Rex puts its CLI on PATH only in its own panes; elsewhere, use the app's copy
 REX_APP_BIN="/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS"
@@ -22,6 +35,23 @@ command -v jq  >/dev/null || { echo "jq not found on PATH" >&2; exit 1; }
 # shell): it restores the project's last nvim session, and quitting nvim closes
 # the window
 NVIM_PROJECT="$HOME/.local/bin/nvim-project"
+
+if $fresh; then
+  kill_ids=$(rex ls --json | jq -r '.sessions[] | select(.label | IN("home", "snipe-mobile", "snipe-it")) | .session_id')
+  # Started from a pane that the kill would close: hand off to a copy of this script
+  # in its own process session (perl's setsid; macOS has no setsid command), so
+  # closing the pane doesn't take the copy with it. The copy drops REX_SESSION and
+  # REX_BLOCK: they name the session being killed, and once it's gone, rex commands
+  # that fall back to them (rex do) fail with "block target default is ambiguous".
+  if [[ -n ${REX_SESSION:-} && -z ${REX_START_DETACHED:-} ]] && grep -qxF "$REX_SESSION" <<<"$kill_ids"; then
+    log="${TMPDIR:-/tmp}/rex-start.log"
+    echo "This pane's session is about to be killed; finishing in the background (log: $log)"
+    env -u REX_SESSION -u REX_BLOCK REX_START_DETACHED=1 perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' "$0" --fresh </dev/null >"$log" 2>&1 &
+    exit 0
+  fi
+  # shellcheck disable=SC2086  # one argument per session ID
+  [[ -z $kill_ids ]] || rex kill $kill_ids >/dev/null
+fi
 
 existing=$(rex ls --json | jq -r '.sessions[].label')
 has_session() { grep -qxF "$1" <<<"$existing"; }
