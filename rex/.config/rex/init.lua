@@ -172,6 +172,62 @@ rex.action{
   end,
 }
 
+-- Close Tab, keeping the floats: before closing a tab, move its session-menu and
+-- server layers to the tab before it (or after it, for the first tab) and minimize
+-- them. Without this, closing the tab they happen to sit on kills them or turns them
+-- into tiled panes that servers_toggle can't find. Closes the tab by ID rather than
+-- via client.tab.close, because moving a focused pane makes its new tab active.
+local function keeps_floating(label)
+  return label == MENU_LABEL or label:sub(1, #SERVER_PREFIX) == SERVER_PREFIX
+end
+
+rex.action{
+  name = "tab_close_keep_floats",
+  title = "Close Tab (Keep Floating Panes)",
+  description = "Close the current tab after moving its session-menu and server panes to a neighbouring tab.",
+  run = function(ctx)
+    local sid = ctx.session_id
+    if not ctx.block_id then error("No focused pane, so the current tab is unknown") end
+    local view = rex.call("session.attach", { session_id = sid }).view
+    local labels = {}
+    for _, b in ipairs(rex.call("session.list_blocks", { session_id = sid }).blocks or {}) do
+      labels[b.block_id] = b.label or ""
+    end
+
+    local windows = view.windows or {}
+    local cur, idx
+    for i, w in ipairs(windows) do
+      for _, layer in ipairs(w.layers or {}) do
+        for _, id in ipairs(leaves(layer.layout)) do
+          if id == ctx.block_id then cur, idx = w, i end
+        end
+      end
+    end
+    if not cur then error("Couldn't find the tab holding the focused pane") end
+
+    local target = windows[idx - 1] or windows[idx + 1]
+    if target then
+      for _, layer in ipairs(cur.layers or {}) do
+        if layer.kind == "floating" then
+          local keep = false
+          for _, id in ipairs(leaves(layer.layout)) do
+            if keeps_floating(labels[id] or "") then keep = true end
+          end
+          if keep then
+            local moved = move_layer(sid, layer, target)
+            if moved then
+              rex.call("session.set_layer_state", { session_id = sid, layer_id = moved, state = "minimized" })
+            end
+          end
+        end
+      end
+    end
+
+    local _, err = rex.call("session.close_window", { session_id = sid, window_id = cur.window_id })
+    if err ~= nil then error(err, 0) end
+  end,
+}
+
 -- Agent jump (tmux: prefix + N, tmux-agent-notify jump): go to the oldest pane whose
 -- agent finished or is waiting for you. Claude Code reports its state to Rex itself
 -- (Program Status: working, idle, blocked, error, done). Rex doesn't tell the server
@@ -267,7 +323,7 @@ rex.bind(P .. "n", "client.tab.next")
 rex.bind(P .. "p", "client.tab.previous")
 rex.bind(P .. "c", "client.tab.new")
 rex.bind(P .. ",", "client.tab.rename")
-rex.bind(P .. "shift+7", "client.tab.close")      -- &
+rex.bind(P .. "shift+7", "tab_close_keep_floats") -- & (moves floating panes off first)
 rex.bind("alt+cmd+right", "client.tab.next")      -- from Ghostty
 rex.bind("alt+cmd+left", "client.tab.previous")
 rex.bind("shift+cmd+left", "client.tab.move", { direction = "backward" })  -- from iTerm2
