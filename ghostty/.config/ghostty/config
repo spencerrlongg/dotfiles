@@ -8,4 +8,4 @@ background-opacity = 0.88
 background-blur = macos-glass-regular
 
 # Kanagawa Dragon, matching Neovim, tmux, btop, and the 16-color terminal apps
-theme = Kanagawa Dragon
+theme = Islands Glass

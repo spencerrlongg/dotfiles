@@ -203,7 +203,7 @@ def rex_apps():
     except json.JSONDecodeError:
         return []
     rows = data.get("clients", data) if isinstance(data, dict) else data
-    return [c.get("client_id") or c.get("id") for c in rows if c.get("kind") == "app"]
+    return [c.get("client_id") for c in rows if (c.get("info") or {}).get("kind") == "app" or c.get("kind") == "app"]
 
 
 def apply_rex(ghostty_file=None, builtin=None):
