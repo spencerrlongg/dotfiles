@@ -375,6 +375,30 @@ return {
           },
         },
       },
+      -- lazygit float: its own solid sheet with a rounded accent outline. Normal is
+      -- transparent (Rex glass), lazygit leaves its cells at the default bg, and
+      -- snacks skips the dimming backdrop over a transparent Normal, so without
+      -- this the popup's text sat on the same glass as the editor behind it.
+      -- LazygitNormal/LazygitBorder/LazygitInactiveBorder come from lua/themes
+      -- (and autocmds.lua for Kanagawa).
+      styles = {
+        lazygit = {
+          border = "rounded",
+          width = 0.92,
+          height = 0.9,
+          wo = {
+            winhighlight = "Normal:LazygitNormal,NormalNC:LazygitNormal,FloatBorder:LazygitBorder",
+          },
+        },
+      },
+      lazygit = {
+        theme = {
+          -- the focused panel gets the accent; the others recede to the border gray
+          activeBorderColor = { fg = "LazygitBorder", bold = true },
+          inactiveBorderColor = { fg = "LazygitInactiveBorder" },
+          searchingActiveBorderColor = { fg = "DiagnosticWarn", bold = true },
+        },
+      },
     },
   },
 }

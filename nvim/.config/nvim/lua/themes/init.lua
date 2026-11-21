@@ -375,6 +375,11 @@ function M.apply(id)
     set("SnacksNotifierTitle" .. name, { fg = c, bold = true })
   end
 
+  -- lazygit float (snacks style "lazygit" in custom.lua): a solid sheet over the glass
+  set("LazygitNormal", { fg = u.fg, bg = blend(u.fg, u.bg, 0.05) })
+  set("LazygitBorder", { fg = u.accent, bg = blend(u.fg, u.bg, 0.05) })
+  set("LazygitInactiveBorder", { fg = u.linenr })
+
   -- Completion (blink.cmp)
   set("BlinkCmpMenu", { fg = u.fg, bg = u.surface })
   set("BlinkCmpMenuBorder", { fg = u.border, bg = u.surface })

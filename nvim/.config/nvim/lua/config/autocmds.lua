@@ -39,6 +39,11 @@ local function make_transparent()
     return
   end
 
+  -- lazygit float (see the snacks spec in custom.lua): solid sheet, accent outline
+  vim.api.nvim_set_hl(0, "LazygitNormal", { fg = "#c5c9c5", bg = "#1d1c1c" })
+  vim.api.nvim_set_hl(0, "LazygitBorder", { fg = "#7E9CD8", bg = "#1d1c1c" })
+  vim.api.nvim_set_hl(0, "LazygitInactiveBorder", { fg = "#625e5a" })
+
   -- Kanagawa Dragon's default border (#54546D) is too close to the background to read
   -- against a transparent float — give it Dragon's crystalBlue accent so the rounded
   -- border set via 'winborder' actually shows up.
