@@ -33,6 +33,12 @@ local function make_transparent()
     vim.api.nvim_set_hl(0, group, { bg = "none" })
   end
 
+  -- Themes from lua/themes (`theme set`) already pick their own border, inactive
+  -- text and separator colors; the fixes below are for Kanagawa Dragon only.
+  if not (vim.g.colors_name or ""):find("^kanagawa") then
+    return
+  end
+
   -- Kanagawa Dragon's default border (#54546D) is too close to the background to read
   -- against a transparent float — give it Dragon's crystalBlue accent so the rounded
   -- border set via 'winborder' actually shows up.

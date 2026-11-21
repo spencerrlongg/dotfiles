@@ -19,6 +19,22 @@ set -euo pipefail
 # The pane starts with the login environment only, which doesn't have Homebrew's bin
 export PATH="/opt/homebrew/bin:$HOME/.local/bin:$PATH"
 
+# Colors from the active theme (`theme set`), Kanagawa Dragon when there is none.
+# Re-read before every menu, since this pane stays open across theme changes.
+load_theme() {
+  local pair var
+  unset "${!THEME_@}"
+  THEME_FZF_COLORS='fg:#c5c9c5,bg:-1,hl:#ffa066,fg+:#c5c9c5,bg+:#282727,hl+:#ffa066,info:#737c73,prompt:#98bb6c,pointer:#ffa066,border:#625e5a,header:#737c73'
+  # shellcheck source=/dev/null
+  [[ -r ${THEME_DIR:-$HOME/.config/theme/active}/menu.sh ]] && . "${THEME_DIR:-$HOME/.config/theme/active}/menu.sh"
+  COLOR_ARGS=()
+  for pair in accent:ACCENT fg:FG dir:DIR dim:DIM head:HEAD ok:OK warn:WARN error:ERROR; do
+    var=THEME_RGB_${pair#*:}
+    [[ -n ${!var:-} ]] && COLOR_ARGS+=("c_${pair%%:*}=${!var}")
+  done
+  return 0
+}
+
 CLIENT=${1:-${REX_CLIENT:-}}
 SELF=${REX_BLOCK:-}
 PREVIEW_LINES=80
@@ -87,13 +103,19 @@ LUA
 # or done); Claude Code reports these to Rex itself.
 read -r -d '' LIST_PART <<'LUA' || true
 
--- Kanagawa Dragon palette, matching tmux-session-menu
+-- Row colors: "r;g;b" args from the active theme (~/.local/bin/theme writes them to
+-- ~/.config/theme/active/menu.sh), Kanagawa Dragon when no theme is set. GREEN is the
+-- accent (numbers, session names), SAGE the directory column.
 local E = string.char(27)
-local function rgb(r, g, b, bold) return E .. "[" .. (bold and "1;" or "") .. "38;2;" .. r .. ";" .. g .. ";" .. b .. "m" end
-local GREEN, FG, ORANGE, RED = rgb(152, 187, 108), rgb(197, 201, 197), rgb(255, 160, 102), rgb(196, 116, 110)
-local SAGE, DIM, HEAD, OFF = rgb(135, 169, 135), rgb(98, 94, 90), rgb(115, 124, 115, true), E .. "[0m"
+local function rgb(c, bold) return E .. "[" .. (bold and "1;" or "") .. "38;2;" .. c .. "m" end
+local A = rex.args
+local GREEN, FG = rgb(A.c_accent or "152;187;108"), rgb(A.c_fg or "197;201;197")
+local ORANGE, RED = rgb(A.c_warn or "255;160;102"), rgb(A.c_error or "196;116;110")
+local SAGE, DIM = rgb(A.c_dir or "135;169;135"), rgb(A.c_dim or "98;94;90")
+local HEAD, OFF = rgb(A.c_head or "115;124;115", true), E .. "[0m"
+local OK = rgb(A.c_ok or "152;187;108")
 local rank = { blocked = 3, error = 2, done = 1 }
-local marks = { done = GREEN .. "󰄬" .. OFF, blocked = ORANGE .. "󰋗" .. OFF, error = RED .. "󰅖" .. OFF }
+local marks = { done = OK .. "󰄬" .. OFF, blocked = ORANGE .. "󰋗" .. OFF, error = RED .. "󰅖" .. OFF }
 
 local rows, order = {}, {}
 each_window(function(s, w, b, ids)
@@ -176,6 +198,7 @@ end
 LUA
 
 run_menu() {
+load_theme
 PREVIEWS=$(mktemp -d "${TMPDIR:-/tmp}/rex-session-menu.XXXXXX")
 rex do - self="$SELF" dir="$PREVIEWS" lines="$PREVIEW_LINES" <<<"$PREVIEW_QUERY" >/dev/null 2>&1 &
 preview_pid=$!
@@ -192,7 +215,7 @@ done
 # it finishes doesn't fail the pipeline). Preview from the file the background query
 # wrote; until it lands, ask rex directly.
 picked=$(
-  fzf "${binds[@]}" < <(rex do - self="$SELF" dir="$PREVIEWS" top="$TOP" bottom="$BOTTOM" <<<"$LIST_QUERY") \
+  fzf "${binds[@]}" < <(rex do - self="$SELF" dir="$PREVIEWS" top="$TOP" bottom="$BOTTOM" ${COLOR_ARGS[@]+"${COLOR_ARGS[@]}"} <<<"$LIST_QUERY") \
     --no-input \
     --bind 'j:down,k:up' \
     --bind '/:show-input+unbind(j,k,/)' \
@@ -207,8 +230,7 @@ picked=$(
     --prompt='  ' \
     --pointer='▸' \
     --header-lines=1 \
-    --color='fg:#c5c9c5,bg:-1,hl:#ffa066,fg+:#c5c9c5,bg+:#282727,hl+:#ffa066' \
-    --color='info:#737c73,prompt:#98bb6c,pointer:#ffa066,border:#625e5a,header:#737c73' \
+    --color="$THEME_FZF_COLORS" \
     --preview="[[ -n {3} ]] || exit 0; cat '$PREVIEWS'/{3} 2>/dev/null || rex capture -s {1} -b {3} --format=vt --trim | tail -n $PREVIEW_LINES" \
     --preview-window='down,60%,border-top,follow' \
 ) || picked=

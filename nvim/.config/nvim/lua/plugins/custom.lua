@@ -97,13 +97,16 @@ return {
     },
   },
 
-  -- Active colorscheme: tokyonight-night (closest color-role match to JetBrains Dark)
-  -- Swap to "kanagawa-dragon" if you want a more muted/neutral feel
+  -- Active colorscheme: the theme picked with `theme set` (palettes in
+  -- ~/.config/theme/themes, highlights from lua/themes), or $NVIM_THEME for
+  -- previews; kanagawa-dragon when neither is set. Running nvims follow `theme set`.
   {
     "LazyVim/LazyVim",
-    opts = {
-      colorscheme = "kanagawa-dragon",
-    },
+    opts = function(_, opts)
+      local themes = require("themes")
+      opts.colorscheme = themes.current() or "kanagawa-dragon"
+      themes.watch()
+    end,
   },
 
   -- Auto-close and rename JSX/HTML tags (essential for React/RN)
@@ -250,59 +253,65 @@ return {
       -- Kanagawa Dragon is the same green as string literals. Pin it to carpYellow
       -- so "modified" reads as its own signal instead of matching syntax colors.
       -- fg only: the bg for each tab state is inherited from bufferline's defaults.
-      highlights = {
-        -- Tabpage indicators (the numbers at the right edge). Kanagawa draws the
-        -- *selected* one as #282727 on #181616 — all but invisible — while the
-        -- unselected ones get a bright #737C73, so the tabpage you are actually in
-        -- reads as the inactive one. Mirror the buffer_selected treatment below.
-        tab = { fg = "#625e5a", bg = "#121010" },
-        tab_selected = { fg = "#DCD7BA", bg = "#282727", bold = true },
-        tab_separator = { fg = "#0D0C0C", bg = "#121010" },
-        tab_separator_selected = { fg = "#0D0C0C", bg = "#282727" },
+      -- A function so bufferline re-reads it on every ColorScheme: themes from
+      -- lua/themes supply their own set; the table below is for kanagawa-dragon.
+      highlights = function()
+        local themed = require("themes").bufferline()
+        if themed then return themed end
+        return {
+          -- Tabpage indicators (the numbers at the right edge). Kanagawa draws the
+          -- *selected* one as #282727 on #181616 — all but invisible — while the
+          -- unselected ones get a bright #737C73, so the tabpage you are actually in
+          -- reads as the inactive one. Mirror the buffer_selected treatment below.
+          tab = { fg = "#625e5a", bg = "#121010" },
+          tab_selected = { fg = "#DCD7BA", bg = "#282727", bold = true },
+          tab_separator = { fg = "#0D0C0C", bg = "#121010" },
+          tab_separator_selected = { fg = "#0D0C0C", bg = "#282727" },
 
-        modified = { fg = "#E6C384" },
-        modified_visible = { fg = "#E6C384" },
-        modified_selected = { fg = "#E6C384" },
+          modified = { fg = "#E6C384" },
+          modified_visible = { fg = "#E6C384" },
+          modified_selected = { fg = "#E6C384" },
 
-        -- Active tab. By default the selected buffer differs from the rest only by
-        -- fg (dragonWhite vs comment gray) on an identical background, which is hard
-        -- to pick out in a row of tabs. Give it a lighter block, full-strength text,
-        -- and drop the default italic so the name stays crisp.
-        buffer_selected = {
-          fg = "#DCD7BA",
-          bg = "#282727",
-          bold = true,
-          italic = false,
-        },
-        -- A buffer carrying a diagnostic has its name drawn with the matching
-        -- severity group rather than buffer_selected, and every one of those
-        -- defaults to bg = Normal (#181616 under Dragon). On the active tab that
-        -- paints the filename onto near-black inside an otherwise #282727 block,
-        -- so the name sits in a dark patch with the icon and close button around
-        -- it. Match the active background; fg stays at the severity color.
-        hint_selected = { bg = "#282727" },
-        info_selected = { bg = "#282727" },
-        warning_selected = { bg = "#282727" },
-        error_selected = { bg = "#282727" },
-        -- Same for the indicator text appended after the name. LazyVim only
-        -- renders one for errors and warnings, but pin all four so the two that
-        -- do show up cannot drift from the tab they sit on.
-        hint_diagnostic_selected = { bg = "#282727" },
-        info_diagnostic_selected = { bg = "#282727" },
-        warning_diagnostic_selected = { bg = "#282727" },
-        error_diagnostic_selected = { bg = "#282727" },
+          -- Active tab. By default the selected buffer differs from the rest only by
+          -- fg (dragonWhite vs comment gray) on an identical background, which is hard
+          -- to pick out in a row of tabs. Give it a lighter block, full-strength text,
+          -- and drop the default italic so the name stays crisp.
+          buffer_selected = {
+            fg = "#DCD7BA",
+            bg = "#282727",
+            bold = true,
+            italic = false,
+          },
+          -- A buffer carrying a diagnostic has its name drawn with the matching
+          -- severity group rather than buffer_selected, and every one of those
+          -- defaults to bg = Normal (#181616 under Dragon). On the active tab that
+          -- paints the filename onto near-black inside an otherwise #282727 block,
+          -- so the name sits in a dark patch with the icon and close button around
+          -- it. Match the active background; fg stays at the severity color.
+          hint_selected = { bg = "#282727" },
+          info_selected = { bg = "#282727" },
+          warning_selected = { bg = "#282727" },
+          error_selected = { bg = "#282727" },
+          -- Same for the indicator text appended after the name. LazyVim only
+          -- renders one for errors and warnings, but pin all four so the two that
+          -- do show up cannot drift from the tab they sit on.
+          hint_diagnostic_selected = { bg = "#282727" },
+          info_diagnostic_selected = { bg = "#282727" },
+          warning_diagnostic_selected = { bg = "#282727" },
+          error_diagnostic_selected = { bg = "#282727" },
 
-        -- The ▎ bar on the left edge of the active tab, in the same crystalBlue
-        -- accent used for float borders.
-        indicator_selected = {
-          fg = "#7E9CD8",
-          bg = "#282727",
-        },
-        -- Push the inactive tabs further down so the contrast with the active one
-        -- comes from both directions.
-        background = { fg = "#625e5a" },
-        buffer_visible = { fg = "#7a8382" },
-      },
+          -- The ▎ bar on the left edge of the active tab, in the same crystalBlue
+          -- accent used for float borders.
+          indicator_selected = {
+            fg = "#7E9CD8",
+            bg = "#282727",
+          },
+          -- Push the inactive tabs further down so the contrast with the active one
+          -- comes from both directions.
+          background = { fg = "#625e5a" },
+          buffer_visible = { fg = "#7a8382" },
+        }
+      end,
     },
   },
 
