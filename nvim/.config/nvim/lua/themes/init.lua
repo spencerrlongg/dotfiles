@@ -468,11 +468,14 @@ end
 function M.bufferline()
   if not M.active() then return nil end
   local u, d = M.palette().ui, M.palette().diag
-  local sel = u.surface_hi
+  -- The active tab is a solid accent-tinted block: a plain lighter gray all but
+  -- disappears against Rex's glass. Inactive tabs sit on the glass in dim text.
+  local sel = blend(u.accent, u.bg, 0.24)
   local h = {
     fill = { bg = "NONE" },
-    background = { fg = u.fg_dim, bg = "NONE" },
-    buffer_visible = { fg = u.fg, bg = "NONE" },
+    background = { fg = u.fg_dim, bg = "NONE", italic = false },
+    buffer = { fg = u.fg_dim, bg = "NONE", italic = false },
+    buffer_visible = { fg = u.fg, bg = "NONE", italic = false },
     buffer_selected = { fg = u.fg_bright, bg = sel, bold = true, italic = false },
     tab = { fg = u.fg_dim, bg = "NONE" },
     tab_selected = { fg = u.fg_bright, bg = sel, bold = true },
@@ -488,6 +491,7 @@ function M.bufferline()
     modified_visible = { fg = d.warn, bg = "NONE" },
     modified_selected = { fg = d.warn, bg = sel },
     indicator_selected = { fg = u.accent, bg = sel },
+    indicator = { fg = u.bg_alt, bg = "NONE" },
     indicator_visible = { fg = u.bg_alt, bg = "NONE" },
     duplicate = { fg = u.linenr, bg = "NONE", italic = true },
     duplicate_selected = { fg = u.fg_dim, bg = sel, italic = true },
