@@ -1,0 +1,8 @@
+/* macOS-wide text field keys (Cocoa text system). Read by each app at launch.
+ * ctrl+j / ctrl+k move down / up, so Rex's session picker (ctrl+a j, cmd+k) and
+ * other list-backed search fields move the selection with vim keys. Replaces the
+ * default ctrl+k "delete to end of line" in every app. Added 2026-11-21. */
+{
+    "^j" = "moveDown:";
+    "^k" = "moveUp:";
+}
