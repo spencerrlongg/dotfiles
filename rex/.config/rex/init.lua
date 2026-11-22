@@ -39,9 +39,9 @@ rex.action{
 }
 
 -- --- Floating layers that follow you ------------------------------------------------
--- Rex floating layers belong to one tab. The session menu and the server panes stay
--- running in a minimized floating layer, and their keys bring that layer to whichever
--- tab you're on (the programs keep running through the move).
+-- Rex floating layers belong to one tab. The server panes stay running in a minimized
+-- floating layer, and ctrl+a f brings that layer to whichever tab you're on (the
+-- programs keep running through the move).
 
 local function leaves(node, out)
   out = out or {}
@@ -111,44 +111,6 @@ local function show_layer(sid, layer_id)
   rex.call("session.set_layer_state", { session_id = sid, layer_id = layer_id, state = "normal", focus = true })
 end
 
--- Session menu: ~/.local/bin/rex-session-menu (fzf; j/k move, / searches, 0-9 jump)
--- in a floating pane labeled "session-menu". The first use in a session opens it;
--- after a pick or Esc the script minimizes it and waits. Later uses show it again
--- (moving it to this tab) and type the client id and Return, which starts the menu.
-local MENU_LABEL = "session-menu"
-
-rex.action{
-  name = "session_menu",
-  title = "Session Menu",
-  description = "Pick a session or tab with vim keys (j/k, / to search, 0-9 to jump).",
-  run = function(ctx)
-    local sid = ctx.session_id
-    local m = find_layer(ctx, function(label) return label == MENU_LABEL end)
-    if not m.layer then
-      local command = { os.getenv("HOME") .. "/.local/bin/rex-session-menu" }
-      if ctx.client_id then table.insert(command, ctx.client_id) end
-      rex.call("session.new_layer", {
-        session_id = sid,
-        window_id = m.cur_win and m.cur_win.window_id or nil,
-        bounds = { 0.15, 0.1, 0.7, 0.8 },
-        focus = true,
-        -- started directly, skipping the login shell; the script sets its own PATH
-        layout = { block = { flavor = "com.superlogical.terminal.shell", label = MENU_LABEL,
-          options = { command = command, shell = "none" } } },
-      })
-      return
-    end
-    local layer_id = m.layer.layer_id
-    if m.win.window_id ~= m.cur_win.window_id then layer_id = move_layer(sid, m.layer, m.cur_win) end
-    -- Only a minimized menu is waiting for input; an open one is already running fzf
-    if m.layer.state == "minimized" then
-      rex.block.call("com.superlogical.terminal", "write",
-        { session_id = sid, block_id = m.block, data = (ctx.client_id or "") .. "\r" })
-    end
-    show_layer(sid, layer_id)
-  end,
-}
-
 -- Server toggle: each project session keeps its dev servers (expo, ngrok, ...) in one
 -- floating layer whose panes are labeled "server: NAME". On the layer's own tab the
 -- key minimizes or restores it; on another tab it moves the panes over and shows them.
@@ -172,19 +134,18 @@ rex.action{
   end,
 }
 
--- Close Tab, keeping the floats: before closing a tab, move its session-menu and
--- server layers to the tab before it (or after it, for the first tab) and minimize
+-- Close Tab, keeping the floats: before closing a tab, move its server layers to the tab before it (or after it, for the first tab) and minimize
 -- them. Without this, closing the tab they happen to sit on kills them or turns them
 -- into tiled panes that servers_toggle can't find. Closes the tab by ID rather than
 -- via client.tab.close, because moving a focused pane makes its new tab active.
 local function keeps_floating(label)
-  return label == MENU_LABEL or label:sub(1, #SERVER_PREFIX) == SERVER_PREFIX
+  return label:sub(1, #SERVER_PREFIX) == SERVER_PREFIX
 end
 
 rex.action{
   name = "tab_close_keep_floats",
   title = "Close Tab (Keep Floating Panes)",
-  description = "Close the current tab after moving its session-menu and server panes to a neighbouring tab.",
+  description = "Close the current tab after moving its server panes to a neighbouring tab.",
   run = function(ctx)
     local sid = ctx.session_id
     if not ctx.block_id then error("No focused pane, so the current tab is unknown") end
@@ -302,9 +263,11 @@ rex.action{
 
 -- --- Sessions (tmux: switch-client, choose-tree) -----------------------------------
 rex.bind(P .. "shift+n", "agent_jump")
-rex.bind(P .. "j", "session_menu")
-rex.bind("cmd+k", "session_menu")
-rex.bind(P .. "w", "session_menu")                -- tmux: choose-tree -Zw
+-- Rex's own session picker (the custom fzf menu, rex-session-menu, was retired
+-- 2026-11-21; it's in git history if it's ever wanted back)
+rex.bind(P .. "j", "session.switch")
+rex.bind("cmd+k", "session.switch")
+rex.bind(P .. "w", "session.switch")              -- tmux: choose-tree -Zw
 rex.bind(P .. "s", "session.switch")              -- tmux: choose-tree -Zs (Rex's own picker)
 rex.bind(P .. "shift+r", "goto_session", { label = "home" })
 rex.bind(P .. "shift+w", "goto_session", { label = "snipe-it" })      -- web

@@ -19,7 +19,7 @@ What `set` touches:
                `theme =` line (Ghostty reloads on cmd+shift+, or new windows)
   Neovim       ~/.config/theme/current holds the id; nvims watch it and switch
   tmux         sources build/ID/tmux.conf into a running server
-  menus        rex-session-menu / tmux-session-menu read active/menu.sh
+  menus        tmux-session-menu reads active/menu.sh
   btop, cava   active/btop.theme (linked into ~/.config/btop/themes), active/cava
 """
 import json
@@ -88,7 +88,7 @@ def ghostty(t):
 
 
 def menu_sh(t):
-    """Colors for the fzf session menus (rex-session-menu, tmux-session-menu)."""
+    """Colors for the fzf session menu (tmux-session-menu)."""
     u, s, d = t["ui"], t["syntax"], t["diag"]
     fzf = (
         f"fg:{u['fg']},bg:-1,hl:{u['accent']},fg+:{u['fg_bright']},bg+:{u['surface_hi']},hl+:{u['accent']},"
