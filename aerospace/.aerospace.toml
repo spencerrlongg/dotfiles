@@ -212,3 +212,16 @@ automatically-unhide-macos-hidden-apps = true
     down = 'volume down'
     up = 'volume up'
     shift-down = ['volume set 0', 'mode main']
+
+# Rex windows report their close/minimize/full-screen buttons as disabled to
+# Accessibility, so AeroSpace's dialog check floats every new one and it keeps
+# whatever size it opened at. Tile them explicitly. First matching rule wins, so
+# Rex's Settings window stays floating.
+[[on-window-detected]]
+if.app-id = 'com.superlogical.rex'
+if.window-title-regex-substring = '^Settings$'
+run = 'layout floating'
+
+[[on-window-detected]]
+if.app-id = 'com.superlogical.rex'
+run = 'layout tiling'
