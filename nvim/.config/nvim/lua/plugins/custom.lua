@@ -352,6 +352,29 @@ return {
   -- 200 ms, so jumping to a definition far down a file doesn't drag.
   {
     "folke/snacks.nvim",
+    -- A picker re-applies its layout on every VimResized without checking which
+    -- tab it lives on, and re-applying builds the windows in the current tab. So
+    -- any resize pulled an open explorer into the tab being looked at (the review
+    -- tab). Resizes happen whenever the MacBook Air's Rex window, a different
+    -- size, shows a pane of nvim running on mbp. Skip the re-layout while the
+    -- picker is on another tab; it lays itself out again when it gets a resize
+    -- on its own tab.
+    init = function()
+      vim.api.nvim_create_autocmd("User", {
+        pattern = "VeryLazy",
+        once = true,
+        callback = function()
+          local Picker = require("snacks.picker.core.picker")
+          local set_layout = Picker.set_layout
+          Picker.set_layout = function(self, ...)
+            if self.layout and not self:on_current_tab() then
+              return
+            end
+            return set_layout(self, ...)
+          end
+        end,
+      })
+    end,
     opts = {
       scroll = {
         animate = {
