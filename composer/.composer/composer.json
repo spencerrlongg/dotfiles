@@ -1,0 +1,7 @@
+{
+    "require": {
+        "beyondcode/expose": "^2.6",
+        "barryvdh/laravel-ide-helper": "^3.1",
+        "laravel/lsp": "^0.0.30"
+    }
+}

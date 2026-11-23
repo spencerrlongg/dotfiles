@@ -9,6 +9,9 @@ config live in a separate private repo.
 ## New Mac
 
 ```sh
+# Claude Code and Rex first, before git exists (git waits on the Xcode tools install)
+curl -fsSL https://raw.githubusercontent.com/spencerrlongg/dotfiles/main/bootstrap.sh | bash -s assist
+
 git clone https://github.com/spencerrlongg/dotfiles ~/dotfiles
 ~/dotfiles/bootstrap.sh
 ```
@@ -18,14 +21,16 @@ git clone https://github.com/spencerrlongg/dotfiles ~/dotfiles
 
 | Step | Does |
 |---|---|
+| `assist` | Claude Code and Rex Beta first (no Xcode tools or Homebrew needed), so Claude can help with the rest |
 | `xcode` | Xcode command line tools |
 | `brew` | Homebrew |
 | `repos` | signs in to `gh`, clones the private repo, turns on the secret-scan hook in both |
 | `bundle` | everything in `Brewfile`, including Mac App Store apps |
-| `tools` | oh-my-zsh, nvm + Node + global npm packages, atuin, bun, devnull, Claude Code |
+| `tools` | oh-my-zsh, nvm + Node + global npm packages, atuin, bun, devnull |
 | `link` | stows every package from both repos; files in the way go to `~/.dotfiles-backup/<time>/` |
 | `tmux` | TPM and the plugins in `.tmux.conf` |
 | `macos` | Open in Nvim.app + file associations, LaunchAgents |
+| `composer` | `composer global install` (needs Herd opened once; skips until then) |
 | `checklist` | prints what still needs doing by hand (sign-ins, permissions) |
 
 `tools` runs before `link` on purpose: those installers append to `~/.zshrc` and
@@ -44,6 +49,7 @@ have the lines they need.
 | `aerospace` | `.aerospace.toml` |
 | `bin` | `~/.local/bin` scripts (tmux screensaver, status animation, agent notify, dotfiles-sync, ...) |
 | `misc` | jj config, `.yarnrc`, PhpStorm code style |
+| `composer` | `~/.composer/composer.json`: global Composer packages (laravel/lsp for nvim, expose, laravel-ide-helper) |
 
 Not Stow packages:
 

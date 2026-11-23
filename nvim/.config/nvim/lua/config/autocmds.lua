@@ -29,8 +29,13 @@ local transparent_groups = {
 }
 
 local function make_transparent()
+  -- Clear only the bg: nvim_set_hl replaces the whole group, so setting just
+  -- { bg = "none" } would also drop the theme's fg. Plugins that read Normal's fg
+  -- (Snacks' GitHub pickers blend from it) then get nil and fail to load.
   for _, group in ipairs(transparent_groups) do
-    vim.api.nvim_set_hl(0, group, { bg = "none" })
+    local hl = vim.api.nvim_get_hl(0, { name = group, link = false })
+    hl.bg, hl.ctermbg = nil, nil
+    vim.api.nvim_set_hl(0, group, hl)
   end
 
   -- Themes from lua/themes (`theme set`) already pick their own border, inactive

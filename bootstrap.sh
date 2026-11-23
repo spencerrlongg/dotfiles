@@ -1,17 +1,22 @@
 #!/bin/bash
 # Sets up a new Mac from this repo and dotfiles-private.
 #
+#   # On a fresh Mac, git (and so the clone) waits on the Xcode tools install. To get
+#   # Claude Code and Rex first, run the assist step straight from GitHub:
+#   curl -fsSL https://raw.githubusercontent.com/spencerrlongg/dotfiles/main/bootstrap.sh | bash -s assist
+#
 #   git clone https://github.com/spencerrlongg/dotfiles ~/dotfiles
 #   ~/dotfiles/bootstrap.sh            # every step, in order
 #   ~/dotfiles/bootstrap.sh link tmux  # only the named steps
 #
-# Every step can be re-run. Steps: xcode brew repos bundle tools link tmux macos checklist
+# Every step can be re-run. Steps: assist xcode brew repos bundle tools link tmux macos composer
+# checklist
 set -euo pipefail
 
 DOTFILES=${DOTFILES:-$(cd "$(dirname "$0")" && pwd)}
 DOTFILES_PRIVATE=${DOTFILES_PRIVATE:-$HOME/dotfiles-private}
 PRIVATE_REPO=spencerrlongg/dotfiles-private
-PACKAGES=(zsh git tmux nvim ghostty rex term aerospace bin misc theme)
+PACKAGES=(zsh git tmux nvim ghostty rex term aerospace bin misc theme composer)
 PRIVATE_PACKAGES=(claude codex)   # plus memory, linked separately (see link_memory)
 NODE_VERSION=24
 NPM_GLOBALS=(@openai/codex corepack)
@@ -20,6 +25,52 @@ BACKUP=$HOME/.dotfiles-backup/$(date +%Y%m%d-%H%M%S)
 say()  { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33mwarning: %s\033[0m\n' "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# Claude Code and Rex go first, so Claude can help if a later step fails. Neither
+# needs the Xcode tools or Homebrew: Claude Code's installer is a standalone
+# binary, and Rex comes from the DMG its update feed (appcast) points at.
+REX_APPCAST=https://blob.superlogical.com/public/rex-app/preview-arm64/appcast.xml
+# The DMG holds Rex.app; it's installed under the name the website download uses,
+# because rex-start, open-in-nvim and path.zsh find Rex's CLI there
+REX_APP="/Applications/Rex Beta.app"
+
+step_assist() {
+  say "Claude Code"
+  if [ -e "$HOME/.local/bin/claude" ]; then echo "already installed"
+  else curl -fsSL https://claude.ai/install.sh | bash
+  fi
+
+  say "Rex Beta"
+  if [ -d "$REX_APP" ]; then echo "already installed"; else
+    # The feed lists the newest build first
+    local url tmp mnt app
+    url=$(curl -fsSL "$REX_APPCAST" | grep -o '<enclosure url="[^"]*\.dmg"' | head -1 | sed 's/.*url="//; s/"$//')
+    if [ -z "$url" ]; then
+      warn "couldn't find a Rex download in $REX_APPCAST; download Rex Beta by hand"
+    else
+      tmp=$(mktemp -d)
+      mnt="$tmp/mnt"
+      curl -fL --progress-bar -o "$tmp/rex.dmg" "$url"
+      hdiutil attach -nobrowse -quiet -mountpoint "$mnt" "$tmp/rex.dmg"
+      app=$(find "$mnt" -maxdepth 1 -name '*.app' | head -1)
+      # Only install an app that's signed, notarized and intact
+      if [ -n "$app" ] && codesign --verify --deep --strict "$app" && spctl -a -t exec "$app"; then
+        ditto "$app" "$REX_APP"
+        echo "installed $REX_APP"
+      else
+        warn "the Rex DMG's app didn't pass the signature check; not installed"
+      fi
+      hdiutil detach -quiet "$mnt" || true
+      rm -rf "$tmp"
+    fi
+  fi
+
+  cat <<'EOF'
+
+  To have Claude on hand for the rest of this: open Rex Beta (or Terminal), run
+  ~/.local/bin/claude and /login. Settings, skills and memory arrive with the link step.
+EOF
+}
 
 step_xcode() {
   say "Xcode command line tools"
@@ -96,11 +147,6 @@ step_tools() {
   if [ -x "$HOME/.local/bin/devnull" ]; then echo "already installed"
   else curl -fsSL https://raw.githubusercontent.com/WendellAdriel/dev-null-tui/main/scripts/install.sh | sh
   fi
-
-  say "Claude Code"
-  if [ -e "$HOME/.local/bin/claude" ]; then echo "already installed"
-  else curl -fsSL https://claude.ai/install.sh | bash
-  fi
 }
 
 # Moves a target that isn't already our link into the backup folder, keeping its path
@@ -168,6 +214,21 @@ step_macos() {
   "$DOTFILES/macos/LaunchAgents/install.sh"
 }
 
+# Global Composer packages from ~/.composer/composer.json (the composer package):
+# laravel/lsp is the Laravel language server nvim runs. Composer comes with Herd,
+# which has to be opened once first, so on a new Mac this step skips until then.
+step_composer() {
+  say "Composer global packages"
+  local composer
+  composer=$(command -v composer || true)
+  [ -n "$composer" ] || composer="$HOME/Library/Application Support/Herd/bin/composer"
+  if [ ! -x "$composer" ]; then
+    echo "no Composer yet: open Herd once, then run: $0 composer"
+    return 0
+  fi
+  "$composer" global install || warn "composer global install failed; rerun: $0 composer"
+}
+
 step_checklist() {
   say "Still to do by hand"
   cat <<'EOF'
@@ -179,21 +240,23 @@ step_checklist() {
   - Ghostty: System Settings > Privacy & Security > Screen & System Audio Recording >
     System Audio Recording Only: add Ghostty. Quit Ghostty fully, relaunch, restart the
     tmux server. Without it cava never runs.
-  - Rex: download Rex Beta (no cask yet) and sign in. On this Mac's own server,
-    rex-start builds the sessions. On a laptop that uses another Mac as the host:
-    rex hosts add, then rex -S <host> to work there (the sessions live on the host)
+  - Rex: open Rex Beta (the assist step installed it) and sign in. On this Mac's
+    own server, rex-start builds the sessions. On a laptop that uses another Mac as
+    the host: rex hosts add, then rex -S <host> to work there (the sessions live on
+    the host)
   - Theme: theme set <id> (theme list shows them) builds ~/.config/theme/build and
     active, which aren't in the repo. Run it on the host Mac after a laptop's Rex app
     connects, too: theme set pushes the palette and Tint with Theme to every
     connected Rex app
-  - AeroSpace and Thaw: grant Accessibility when asked
+  - AeroSpace: grant Accessibility when asked
   - Battery: set AlDente's charge limit to 80% (it's in the Brewfile). Use Top Up
     before days away from the desk. When 80% stops lasting the day, raise it to
     85-90% instead of going back to 100%. Alternative without AlDente: System
     Settings > Battery > Charge Limit (built in since macOS 27)
   - macOS screen saver delay must stay above tmux lock-after-time (210 s)
   - Herd: open it once (installs PHP, writes its PATH lines to ~/.zshrc, which is a
-    link into ~/dotfiles: check git diff there afterwards)
+    link into ~/dotfiles: check git diff there afterwards), then run
+    ~/dotfiles/bootstrap.sh composer for the global Composer packages
   - Xcode: open once to accept the license and install simulators; Android Studio:
     SDK and emulator images
   - Tailscale: note the new IP for Expo (npx expo start --host <ip>); update the host
@@ -206,7 +269,7 @@ step_checklist() {
 EOF
 }
 
-ALL=(xcode brew repos bundle tools link tmux macos checklist)
+ALL=(assist xcode brew repos bundle tools link tmux macos composer checklist)
 steps=("$@")
 [ ${#steps[@]} -eq 0 ] && steps=("${ALL[@]}")
 # Later steps need brew on PATH even when run on their own

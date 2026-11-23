@@ -74,15 +74,16 @@ cask "sublime-text"
 
 # --- Mac utilities ---------------------------------------------------------------------
 cask "nikitabobko/tap/aerospace"
-cask "thaw@beta"     # menu bar manager; Thaw 3 beta is the macOS 27 build (`thaw` is 26 only)
+# cask "thaw@beta"     # menu bar manager; Thaw 3 beta is the macOS 27 build (`thaw` is 26 only)
 cask "raycast"
 cask "aldente"
 # cask "soundsource" not using this rn 
 cask "reflector"
 cask "grandperspective"
 # cask "logi-options+"
-cask "focusrite-control"
+# cask "focusrite-control"
 cask "clamxav"
+cask "tailscale-app"  # Tailscale's standalone build: updates itself, ahead of the App Store one
 # cask "private-internet-access"
 # cask "jordanbaird-ice"     # replaced by Thaw
 # cask "bartender"           # replaced by Thaw
@@ -102,7 +103,6 @@ cask "steam"
 # --- Mac App Store (needs `mas` and an App Store sign-in) -----------------------------
 brew "mas"
 mas "Xcode", id: 497799835
-mas "Tailscale", id: 1475387142
 mas "Slack", id: 803453959
 mas "Xdebug Key", id: 1441712067
 mas "Refined GitHub", id: 1519867270
@@ -113,14 +113,14 @@ mas "Dato", id: 1470584107
 mas "Hush", id: 1544743900
 mas "Squirrel", id: 1669664068
 mas "Vidimote", id: 1585702412
-mas "Pages", id: 409201541
-mas "Numbers", id: 409203825
-mas "Keynote", id: 409183694
-mas "GarageBand", id: 682658836
-mas "Logic Pro", id: 634148309
+# mas "Pages", id: 409201541
+# mas "Numbers", id: 409203825
+# mas "Keynote", id: 409183694
+# mas "GarageBand", id: 682658836
+# mas "Logic Pro", id: 634148309
 mas "Minesweeper", id: 1475921958
-mas "Snake.io+", id: 6443553808
-mas "ZenPinballParty", id: 1536783591
+# mas "Snake.io+", id: 6443553808
+# mas "ZenPinballParty", id: 1536783591
 
 # Installed by hand today, no cask or App Store ID found; download these yourself:
 # Astropad Workbench, CARROT Weather, Festivitas, Hue Sync, Mirage Host, SnipeMate,
