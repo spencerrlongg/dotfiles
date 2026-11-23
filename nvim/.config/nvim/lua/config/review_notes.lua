@@ -36,6 +36,9 @@ local MAX_EXCERPT = 60
 -- blank them: comment (U+EA6B), comment-discussion (U+EAC7), check (U+EAB2).
 local ICONS = { open = "\238\169\171", replied = "\238\171\135", resolved = "\238\170\178" }
 local HL = { open = "ReviewNoteOpen", replied = "ReviewNoteReplied", resolved = "ReviewNoteResolved" }
+-- The file-history panel keeps a comment icon for resolved notes (green, from HL),
+-- since its rows already carry review_marks.lua's reviewed checkmarks.
+local PANEL_ICONS = { open = ICONS.open, replied = ICONS.replied, resolved = ICONS.open }
 
 ---An attribute (fg/bg) of a highlight group after following links, or nil.
 local function hl_attr(name, attr)
@@ -469,7 +472,7 @@ local function decorate_panel(panel)
     if row >= 0 and row < line_count then
       local status = HL[c.status] and c.status or "open"
       api.nvim_buf_set_extmark(buf, NS_PANEL, row, 0, {
-        virt_text = { { ICONS[status] .. " " .. c.n, HL[status] } },
+        virt_text = { { PANEL_ICONS[status] .. " " .. c.n, HL[status] } },
         virt_text_pos = "eol",
         hl_mode = "combine",
         priority = 90,
@@ -533,21 +536,27 @@ end
 -- Editing
 ---------------------------------------------------------------------------
 
----A small markdown float for writing a message. <C-s> saves, q cancels.
+---A small markdown float for writing a message. <C-s> saves, <C-g> saves and sends
+---the repo's open notes to Claude (M.send_to_claude), q cancels.
+---@param toplevel string the repo the note belongs to
 ---@param on_save fun(text: string)
-local function editor(title, lines, on_save)
+---@param after? fun() runs once the float has closed, saved or not
+local function editor(title, lines, toplevel, on_save, after)
   local empty = #lines == 0 or (#lines == 1 and lines[1] == "")
-  local function save(self)
+  local function save(self, send)
     local text = vim.trim(table.concat(api.nvim_buf_get_lines(self.buf, 0, -1, false), "\n"))
     vim.cmd.stopinsert()
     self:close()
     if text ~= "" then
       on_save(text)
+      if send then
+        M.send_to_claude(toplevel)
+      end
     end
   end
   Snacks.win({
     title = " " .. title .. " ",
-    footer = " <C-s> save · q cancel ",
+    footer = " <C-s> save · <C-g> save & send to Claude · q cancel ",
     width = 0.5,
     min_width = 60,
     height = 0.3,
@@ -558,9 +567,21 @@ local function editor(title, lines, on_save)
     text = empty and { "" } or lines,
     bo = { buftype = "nofile", bufhidden = "wipe", swapfile = false },
     wo = { wrap = true, linebreak = true, spell = true },
+    on_close = function()
+      if after then
+        vim.schedule(after)
+      end
+    end,
     keys = {
       q = "close",
       ["<C-s>"] = { save, mode = { "n", "i" }, desc = "Save" },
+      ["<C-g>"] = {
+        function(self)
+          save(self, true)
+        end,
+        mode = { "n", "i" },
+        desc = "Save and send to Claude",
+      },
     },
   })
   if empty then
@@ -606,7 +627,7 @@ function M.comment(visual)
 
   local excerpt = api.nvim_buf_get_lines(0, first - 1, math.min(last, first + MAX_EXCERPT - 1), false)
   local label = range_label({ path = t.file.path, start = first, ["end"] = last })
-  editor("Comment · " .. label, {}, function(text)
+  editor("Comment · " .. label, {}, t.toplevel, function(text)
     mutate(t.toplevel, function(data)
       local id = 0
       for _, note in ipairs(data.notes) do
@@ -639,9 +660,10 @@ local function find(data, id)
 end
 
 ---@param note ReviewNote
----@param t ReviewTarget
-function M.reply(note, t)
-  editor(("Reply · #%d %s"):format(note.id, range_label(note)), {}, function(text)
+---@param t ReviewTarget|{toplevel: string}
+---@param after? fun() runs once the editor has closed, saved or not
+function M.reply(note, t, after)
+  editor(("Reply · #%d %s"):format(note.id, range_label(note)), {}, t.toplevel, function(text)
     mutate(t.toplevel, function(data)
       local fresh = find(data, note.id)
       if not fresh then
@@ -652,7 +674,7 @@ function M.reply(note, t)
       table.insert(fresh.thread, { from = "you", body = text, at = now() })
       fresh.status = "open"
     end)
-  end)
+  end, after)
 end
 
 ---@return ReviewTarget|nil, ReviewNote|nil
@@ -686,7 +708,7 @@ function M.edit()
     return notify("Nothing of yours to edit in #" .. note.id)
   end
   local lines = vim.split(note.thread[index].body, "\n", { plain = true })
-  editor(("Edit · #%d %s"):format(note.id, range_label(note)), lines, function(text)
+  editor(("Edit · #%d %s"):format(note.id, range_label(note)), lines, t.toplevel, function(text)
     mutate(t.toplevel, function(data)
       local fresh = find(data, note.id)
       if not (fresh and fresh.thread and fresh.thread[index]) then
@@ -702,7 +724,6 @@ function M.edit()
   end)
 end
 
----Resolve the note under the cursor, or reopen it when it's resolved.
 ---Resolve `note`, or reopen it when it's resolved.
 ---@param toplevel string
 ---@param note ReviewNote
@@ -791,51 +812,6 @@ local function thread_markdown(note)
   return lines, marks
 end
 
----Show the whole thread of the note under the cursor.
-function M.view()
-  local t, note = cursor_note()
-  if not (t and note) then
-    return
-  end
-  local resolve_label = note.status == "resolved" and "reopen" or "resolve"
-  local lines, marks = thread_markdown(note)
-  local win = Snacks.win({
-    title = (" Note #%d "):format(note.id),
-    footer = (" r reply · x %s · q close "):format(resolve_label),
-    width = 0.6,
-    min_width = 70,
-    height = 0.6,
-    border = "rounded",
-    enter = true,
-    ft = "markdown",
-    text = lines,
-    bo = { buftype = "nofile", bufhidden = "wipe", modifiable = false },
-    wo = { wrap = true, linebreak = true, conceallevel = 2 },
-    keys = {
-      q = "close",
-      r = {
-        function(self)
-          self:close()
-          M.reply(note, t)
-        end,
-        desc = "Reply",
-      },
-      x = {
-        function(self)
-          self:close()
-          set_resolved(t.toplevel, note)
-        end,
-        desc = resolve_label == "reopen" and "Reopen" or "Resolve",
-      },
-    },
-  })
-  for _, mark in ipairs(marks) do
-    local opts = vim.deepcopy(mark)
-    opts.row, opts.col = nil, nil
-    api.nvim_buf_set_extmark(win.buf, NS, mark.row - 1, mark.col, opts)
-  end
-end
-
 ---------------------------------------------------------------------------
 -- List
 ---------------------------------------------------------------------------
@@ -884,8 +860,96 @@ local function jump(note, toplevel)
   end)()
 end
 
+---Show a note's whole thread in a float.
+---  o  go to the code (closes the float)
+---  r  reply; the thread reopens afterwards with your message in it
+---  x  resolve / reopen
+---  q  close, or back to the list when the thread was opened from it (`back`)
+---@param note ReviewNote
+---@param toplevel string
+---@param back? fun() reopens the list
+local function open_thread(note, toplevel, back)
+  local resolve_label = note.status == "resolved" and "reopen" or "resolve"
+  local lines, marks = thread_markdown(note)
+
+  -- What runs once the float has closed; each key sets it, then closes.
+  local next_step = back
+  local function close_then(fn, desc)
+    return {
+      function(self)
+        next_step = fn
+        self:close()
+      end,
+      desc = desc,
+    }
+  end
+  local function reopen()
+    local s = load(toplevel)
+    local fresh = s and find(s.data, note.id)
+    if fresh then
+      open_thread(fresh, toplevel, back)
+    end
+  end
+
+  local keys = {
+    q = close_then(back, back and "Back to the list" or "Close"),
+    o = close_then(function()
+      jump(note, toplevel)
+    end, "Go to the code"),
+    r = close_then(function()
+      M.reply(note, { toplevel = toplevel }, reopen)
+    end, "Reply"),
+    x = close_then(function()
+      set_resolved(toplevel, note)
+      if back then
+        back()
+      end
+    end, resolve_label == "reopen" and "Reopen" or "Resolve"),
+  }
+  if back then
+    keys["<Esc>"] = close_then(nil, "Close")
+  end
+
+  local footer = back and " o code · r reply · x %s · q list · <Esc> close "
+    or " o code · r reply · x %s · q close "
+  local win = Snacks.win({
+    title = (" Note #%d "):format(note.id),
+    footer = footer:format(resolve_label),
+    width = 0.6,
+    min_width = 70,
+    height = 0.6,
+    border = "rounded",
+    enter = true,
+    ft = "markdown",
+    text = lines,
+    bo = { buftype = "nofile", bufhidden = "wipe", modifiable = false },
+    wo = { wrap = true, linebreak = true, conceallevel = 2 },
+    on_close = function()
+      if next_step then
+        vim.schedule(next_step)
+      end
+    end,
+    keys = keys,
+  })
+  for _, mark in ipairs(marks) do
+    local opts = vim.deepcopy(mark)
+    opts.row, opts.col = nil, nil
+    api.nvim_buf_set_extmark(win.buf, NS, mark.row - 1, mark.col, opts)
+  end
+end
+
+---Show the whole thread of the note under the cursor.
+function M.view()
+  local t, note = cursor_note()
+  if t and note then
+    open_thread(note, t.toplevel)
+  end
+end
+
 ---Pick from every note in the repo; replied ones (waiting on you) first.
-function M.list()
+---<CR> opens the thread; `q` in the thread comes back here.
+---@param focus_id? integer note to put the cursor on
+function M.list(focus_id)
   local toplevel = view_toplevel(current_view())
   if not toplevel then
     local out = vim.fn.systemlist({ "git", "rev-parse", "--show-toplevel" })
@@ -920,7 +984,7 @@ function M.list()
     return a.note.id < b.note.id
   end)
 
-  Snacks.picker.pick({
+  local picker = Snacks.picker.pick({
     title = "Review notes",
     items = items,
     preview = "preview",
@@ -935,15 +999,37 @@ function M.list()
         { first_line(msg and msg.body), "ReviewNoteText" },
       }
     end,
-    confirm = function(picker, item)
-      picker:close()
+    confirm = function(p, item)
+      p:close()
       if item then
+        local id = item.note.id
         vim.schedule(function()
-          jump(item.note, toplevel)
+          open_thread(item.note, toplevel, function()
+            M.list(id)
+          end)
         end)
       end
     end,
   })
+
+  -- Coming back from a thread: put the cursor on that note again (same approach
+  -- as Snacks.picker.resume).
+  if focus_id and picker then
+    picker.matcher.task:on(
+      "done",
+      vim.schedule_wrap(function()
+        if picker.closed then
+          return
+        end
+        for item, idx in picker:iter() do
+          if item.note.id == focus_id then
+            picker.list:view(idx)
+            return
+          end
+        end
+      end)
+    )
+  end
 end
 
 ---------------------------------------------------------------------------
@@ -1093,8 +1179,9 @@ end
 ---Type /review-notes into the Claude Code session working in this repo, so its
 ---open notes get handled without leaving Neovim. With one Claude in the repo it goes
 ---there; otherwise pick one (remembered for this repo until that pane is gone).
-function M.send_to_claude()
-  local toplevel = view_toplevel(current_view())
+---@param toplevel? string the repo; defaults to the current view's, then cwd's
+function M.send_to_claude(toplevel)
+  toplevel = toplevel or view_toplevel(current_view())
   if not toplevel then
     local out = vim.fn.systemlist({ "git", "rev-parse", "--show-toplevel" })
     toplevel = vim.v.shell_error == 0 and out[1] or nil

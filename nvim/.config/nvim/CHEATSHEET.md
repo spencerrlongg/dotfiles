@@ -161,17 +161,20 @@ here.
 | Key | Action |
 |---|---|
 | `<leader>rc` | Comment on the line (visual: on the selection); on a noted line, reply |
-| `<leader>rv` | View the whole thread (in it: `r` reply, `x` resolve / reopen) |
+| `<leader>rv` | View the whole thread (in it: `o` go to code, `r` reply, `x` resolve / reopen) |
 | `<leader>re` | Edit your last message in the note |
 | `<leader>rr` | Resolve / reopen |
 | `<leader>rd` | Delete |
-| `<leader>rl` | List every note in the repo (waiting on you first); `<CR>` jumps to it |
+| `<leader>rl` | List every note in the repo (waiting on you first); `<CR>` opens its thread, and `q` there comes back to the list |
 | `<leader>rs` | Send to Claude: types `/review-notes` into the Claude Code session for this repo (Rex or tmux) |
 
-In the comment editor, `<C-s>` saves and `q` cancels. A note shows as a sign down its
-lines and its latest message after the last line. Blue means open (Claude's turn), yellow
-means Claude replied (your turn), and green means resolved. File rows in the panel show
-a note count. Notes live in `.git/review-notes.json`, so they're never committed.
+In the comment editor, `<C-s>` saves, `<C-g>` saves and sends to Claude (same as
+`<leader>rs`), and `q` cancels. A note shows as a sign down its lines and its latest
+message after the last line. Blue means open (Claude's turn), yellow means Claude
+replied (your turn), and green means resolved. File rows in the panel show
+a comment icon and note count in the same colors (no checkmark for resolved, so it
+can't be confused with a reviewed mark). Notes live in `.git/review-notes.json`, so
+they're never committed.
 
 `<leader>rs` looks for Claude Code sessions in every Rex session (or tmux pane), not
 just this one. When exactly one is working inside this repo, the command goes there.

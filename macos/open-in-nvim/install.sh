@@ -29,6 +29,12 @@ codesign --force --sign - "$app"
 
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$app"
 grep -v '^#' "$here/extensions" | while read -r ext; do
-  [ -n "$ext" ] && duti -s "$id" ".$ext" all
+  # A line with a dot is a content type (UTI): some types, like Markdown, keep a
+  # handler of their own that wins over the extension's (Xcode claims Markdown).
+  case "$ext" in
+    "") ;;
+    *.*) duti -s "$id" "$ext" all ;;
+    *) duti -s "$id" ".$ext" all ;;
+  esac
 done
 echo "Open in Nvim.app installed and set as the default for $(grep -vc '^#' "$here/extensions") extensions"
