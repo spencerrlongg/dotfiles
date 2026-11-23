@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Which machine Spencer is typing from, and which machine this shell runs on.
+
+  where-am-i          one line, for people
+  where-am-i --hook   Claude Code UserPromptSubmit hook output (JSON with
+                      additionalContext), so agents know without being told
+
+How it tells, in order:
+  1. Inside a Rex pane: the pane's owner. The Rex app that last took the pane
+     (by typing in it or showing it) owns it and sets its size, so the owner of
+     the pane a prompt was typed into is the Mac it was typed on. The app's
+     client label is the Mac's name ("Spencer's MacBook Air").
+  2. Over ssh or mosh (Blink on the iPad): the connecting address, named from
+     `tailscale status` when it's a tailnet device.
+  3. Otherwise: a terminal on this Mac.
+
+It only reads state, and gives up quietly (no output with --hook) if anything
+fails, so a broken Rex or tailscale never blocks a prompt.
+"""
+import json
+import os
+import subprocess
+import sys
+
+PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+def run(*cmd, timeout=2):
+    env = dict(os.environ, PATH=PATH + ":" + os.environ.get("PATH", ""))
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def this_machine():
+    name = run("scutil", "--get", "ComputerName")
+    return (name or os.uname().nodename).strip()
+
+
+def from_rex():
+    session, block = os.environ.get("REX_SESSION"), os.environ.get("REX_BLOCK")
+    if not (session and block):
+        return None
+    blocks = run("rex", "block", "ls", "-s", session, "--json")
+    clients = run("rex", "client", "list", "--json")
+    if not (blocks and clients):
+        return None
+    try:
+        owner = next(
+            (b.get("owner") for b in json.loads(blocks)["blocks"] if b.get("block_id") == block),
+            None,
+        )
+        for c in json.loads(clients)["clients"]:
+            if c.get("client_id") == owner:
+                info, principal = c.get("info") or {}, c.get("principal") or {}
+                label = info.get("label") or info.get("name") or owner
+                node = principal.get("node")
+                via = f"Rex app over Tailscale from {node}" if node else "Rex app on this Mac"
+                return f"{label} ({via})"
+    except (ValueError, KeyError, TypeError):
+        return None
+    return None
+
+
+def from_ssh():
+    conn = os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_CLIENT")
+    if not conn:
+        return None
+    ip = conn.split()[0]
+    status = run("tailscale", "status")
+    for line in (status or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == ip:
+            return f"{parts[1]} (ssh/mosh over Tailscale)"
+    return f"{ip} (ssh/mosh)"
+
+
+def main():
+    here = this_machine()
+    there = from_rex() or from_ssh()
+    hook = "--hook" in sys.argv[1:]
+    if hook and there is None and not os.environ.get("REX_SESSION") and not os.environ.get("TMUX"):
+        # A plain local terminal: say so, so agents never have to guess.
+        there = f"{here} (a terminal on this Mac)"
+    if there is None:
+        there = f"{here} (local)"
+    line = f"Spencer is typing from: {there}. This session runs on: {here}."
+    if hook:
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": line
+                + " Commands you run execute on the second machine; to act on the MacBook Air"
+                " from the Pro use `rex -S mba` (and `rex -S mbp` from the Air, once added).",
+            }
+        }))
+    else:
+        print(line)
+
+
+if __name__ == "__main__":
+    main()

@@ -208,6 +208,8 @@ step_tmux() {
 }
 
 step_macos() {
+  say "macOS settings (menu bar, Ctrl+arrow shortcuts)"
+  "$DOTFILES/macos/defaults.sh"
   say "Open in Nvim.app and file associations"
   "$DOTFILES/macos/open-in-nvim/install.sh"
   say "LaunchAgents"
