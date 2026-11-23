@@ -51,7 +51,8 @@ local function leaves(node, out)
 end
 
 -- Finds the floating layer holding a pane whose label passes match(label), and the
--- tab you're on (the one with ctx.block_id). Returns view info for both.
+-- tab you're on (the one with ctx.block_id). Returns view info for both, the view,
+-- and `tiled`: matching panes that sit in a tab's layout instead of floating.
 local function find_layer(ctx, match)
   local sid = ctx.session_id
   local view = rex.call("session.attach", { session_id = sid }).view
@@ -66,11 +67,15 @@ local function find_layer(ctx, match)
         if id == ctx.block_id then found.cur_win = w end
         if layer.kind == "floating" and match(labels[id] or "") then
           found.layer, found.win, found.block = layer, w, found.block or id
+        elseif layer.kind == "tiled" and match(labels[id] or "") then
+          found.tiled = found.tiled or {}
+          found.tiled[#found.tiled + 1] = id
         end
       end
     end
   end
   found.cur_win = found.cur_win or found.win
+  found.view = view
   return found
 end
 
@@ -111,9 +116,56 @@ local function show_layer(sid, layer_id)
   rex.call("session.set_layer_state", { session_id = sid, layer_id = layer_id, state = "normal", focus = true })
 end
 
+-- The floating layer (in session.view) that holds block_id
+local function layer_of(sid, block_id)
+  for _, w in ipairs(rex.call("session.view", { session_id = sid }).windows or {}) do
+    for _, l in ipairs(w.layers or {}) do
+      if l.kind == "floating" then
+        for _, id in ipairs(leaves(l.layout)) do
+          if id == block_id then return l end
+        end
+      end
+    end
+  end
+end
+
+-- Floats panes that ended up tiled again, stacked in one layer over `win`, and returns
+-- that layer's id. Rex turns a tab's floating panes into ordinary tiled ones when the
+-- tab's last tiled pane closes (nvim quitting on the tab the servers sat on).
+local DEFAULT_BOUNDS = { 0.5, 0.45, 0.49, 0.53 } -- bottom right, as rex-start makes it
+local function refloat(sid, ids, win)
+  local first = ids[1]
+  local in_win = false
+  for _, l in ipairs(win.layers or {}) do
+    for _, id in ipairs(leaves(l.layout)) do
+      if id == first then in_win = true end
+    end
+  end
+  if not in_win then
+    local anchor
+    for _, l in ipairs(win.layers or {}) do
+      if l.kind == "tiled" then anchor = leaves(l.layout)[1] end
+    end
+    rex.call("session.move_block", { session_id = sid, block_id = first, anchor_block_id = anchor })
+  end
+  rex.call("session.float_block", { session_id = sid, block_id = first, bounds = DEFAULT_BOUNDS })
+  for i = 2, #ids do
+    rex.call("session.move_block", {
+      session_id = sid, block_id = ids[i], anchor_block_id = ids[i - 1],
+      direction = "vertical", ratio = 0.78,
+    })
+  end
+  local l = layer_of(sid, first)
+  return l and l.layer_id
+end
+
 -- Server toggle: each project session keeps its dev servers (expo, ngrok, ...) in one
 -- floating layer whose panes are labeled "server: NAME". On the layer's own tab the
 -- key minimizes or restores it; on another tab it moves the panes over and shows them.
+-- Hiding also sends the layer back to the session's first tab (the claude tab), so it
+-- only sits on another tab while it's showing: if nvim quits on a tab the servers
+-- were left on, Rex would turn them into tiled panes. If that happened anyway, the
+-- key floats them again.
 local SERVER_PREFIX = "server:"
 
 rex.action{
@@ -123,13 +175,37 @@ rex.action{
   run = function(ctx)
     local sid = ctx.session_id
     local s = find_layer(ctx, function(label) return label:sub(1, #SERVER_PREFIX) == SERVER_PREFIX end)
+    if not s.layer and s.tiled and s.cur_win then
+      local id = refloat(sid, s.tiled, s.cur_win)
+      if id then show_layer(sid, id) end
+      return
+    end
     if not s.layer then error("No server panes in this session (labels starting with \"" .. SERVER_PREFIX .. "\")") end
     if s.win.window_id ~= s.cur_win.window_id then
       show_layer(sid, move_layer(sid, s.layer, s.cur_win))
     elseif s.layer.state == "minimized" then
       show_layer(sid, s.layer.layer_id)
     else
-      rex.call("session.set_layer_state", { session_id = sid, layer_id = s.layer.layer_id, state = "minimized" })
+      local home = s.view.windows[1]
+      local anchor
+      for _, l in ipairs(home and home.layers or {}) do
+        if l.kind == "tiled" then anchor = leaves(l.layout)[1] end
+      end
+      if not anchor or home.window_id == s.win.window_id then
+        rex.call("session.set_layer_state", { session_id = sid, layer_id = s.layer.layer_id, state = "minimized" })
+        return
+      end
+      -- Focus a pane of this tab first: moving the focused pane would make the
+      -- home tab active and take you there.
+      for _, l in ipairs(s.win.layers or {}) do
+        if l.kind == "tiled" and leaves(l.layout)[1] then
+          rex.call("session.focus_block", { session_id = sid, block_id = leaves(l.layout)[1] })
+        end
+      end
+      local moved = move_layer(sid, s.layer, home)
+      if moved then
+        rex.call("session.set_layer_state", { session_id = sid, layer_id = moved, state = "minimized" })
+      end
     end
   end,
 }
@@ -276,6 +352,8 @@ rex.bind(P .. "shift+v", "goto_session", { label = "home", tab = "garden" })  --
 rex.bind(P .. "shift+9", "session.previous")      -- (
 rex.bind(P .. "shift+0", "session.next")          -- )
 rex.bind(P .. "shift+4", "session.rename")        -- $
+rex.bind(P .. "tab", "session.recent")            -- tmux: switch-client -l (bound to Tab)
+rex.bind(P .. "shift+l", "session.recent")        -- tmux default L, same thing
 
 -- --- Tabs (tmux windows) -------------------------------------------------------------
 -- tmux numbers windows from 0, Rex tabs from 1: ctrl+a 0 is the first tab, as in tmux
@@ -287,6 +365,7 @@ rex.bind(P .. "p", "client.tab.previous")
 rex.bind(P .. "c", "client.tab.new")
 rex.bind(P .. ",", "client.tab.rename")
 rex.bind(P .. "shift+7", "tab_close_keep_floats") -- & (moves floating panes off first)
+rex.bind(P .. "l", "client.tab.recent.in_session") -- tmux: last-window
 rex.bind("alt+cmd+right", "client.tab.next")      -- from Ghostty
 rex.bind("alt+cmd+left", "client.tab.previous")
 rex.bind("shift+cmd+left", "client.tab.move", { direction = "backward" })  -- from iTerm2
@@ -304,6 +383,7 @@ rex.bind(P .. "ctrl+j", "pane.focus", { direction = "down" })
 rex.bind(P .. "ctrl+k", "pane.focus", { direction = "up" })
 rex.bind(P .. "ctrl+l", "pane.focus", { direction = "right" })
 rex.bind(P .. "o", "pane.focus_next")
+rex.bind(P .. ";", "pane.focus_recent.in_tab")    -- tmux: last-pane
 rex.bind(P .. "z", "pane.zoom")
 rex.bind(P .. "x", "pane.close")
 rex.bind(P .. "shift+1", "pane.move_to_new_tab")  -- ! (break-pane)
