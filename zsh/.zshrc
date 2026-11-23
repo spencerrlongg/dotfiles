@@ -59,3 +59,10 @@ fi
 if [[ -o interactive && -z $CLAUDECODE && -z $NVIM ]] && (( COLUMNS >= 80 && LINES >= 20 )) && command -v fastfetch >/dev/null; then
   fastfetch
 fi
+
+
+# Herd injected NVM configuration
+export NVM_DIR="/Users/spencer/Library/Application Support/Herd/config/nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm
+
+[[ -f "/Applications/Herd.app/Contents/Resources/config/shell/zshrc.zsh" ]] && builtin source "/Applications/Herd.app/Contents/Resources/config/shell/zshrc.zsh"
