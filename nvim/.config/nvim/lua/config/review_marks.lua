@@ -1,5 +1,5 @@
--- Review tracking for the commit panels: unpushed commits (<leader>gU) and branch
--- review (<leader>gR, branch_review.lua, which reads the same marks for its counts).
+-- Review tracking for the branch review panel (<leader>gU, branch_review.lua, which
+-- reads the same marks for its counts and syncs them to GitHub via github_viewed.lua).
 --
 -- Draws a marker on every file row in diffview's file-history panel and remembers
 -- which files have been reviewed across restarts. Marks are set by hand (`m` in the
@@ -111,6 +111,20 @@ end
 local function resolve_blobs(toplevel, entry)
   local hash = entry.commit and entry.commit.hash
   if not hash then
+    return
+  end
+
+  -- The uncommitted-changes row (working_tree.lua): its content changes with every
+  -- save, so it's hashed from disk each time instead of cached like a commit's.
+  local working_tree = require("config.working_tree")
+  if hash == working_tree.NULL then
+    local files = {}
+    for _, file in ipairs(entry.files) do
+      files[#files + 1] = { path = file.path, status = file.status }
+    end
+    for path, blob in pairs(working_tree.blobs(toplevel, files)) do
+      blobs[hash .. ":" .. path] = blob
+    end
     return
   end
 
@@ -413,6 +427,38 @@ end
 ---@return table<string, integer>
 function M.marks(toplevel)
   return read_state()[toplevel] or {}
+end
+
+---Marks (`on`) and unmarks (`off`) keys without going through a panel, for
+---github_viewed.lua pulling GitHub's Viewed checkboxes in. Notifies listeners like a
+---toggle does. Open panels redraw their markers on their next redraw.
+---@param toplevel string
+---@param on? string[]
+---@param off? string[]
+---@return integer changed how many marks actually changed
+function M.set(toplevel, on, off)
+  local st = read_state()
+  local marks = st[toplevel] or {}
+  local now, n = os.time(), 0
+  for _, key in ipairs(on or {}) do
+    if not marks[key] then
+      marks[key] = now
+      n = n + 1
+    end
+  end
+  for _, key in ipairs(off or {}) do
+    if marks[key] then
+      marks[key] = nil
+      n = n + 1
+    end
+  end
+  if n == 0 then
+    return 0
+  end
+  st[toplevel] = next(marks) and marks or nil
+  write_state()
+  changed()
+  return n
 end
 
 ---@param fn fun()

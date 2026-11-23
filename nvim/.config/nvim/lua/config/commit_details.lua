@@ -1,5 +1,5 @@
 -- Commit details pane and steady scrolling for diffview's file-history panel
--- (<leader>gU, <leader>gR, and <leader>gH for a single file).
+-- (<leader>gU, and <leader>gH for a single file).
 --
 -- The panel is a short split along the bottom of the tab. Drawing an expanded
 -- commit's message inside it let a long body fill the whole panel, and <tab> left
@@ -140,13 +140,18 @@ local function update(panel)
   end
 
   local commit = shown_commit(panel)
-  if not commit or commit.hash == s.hash then
+  -- The uncommitted-changes row (working_tree.lua) keeps the same null hash while its
+  -- file list changes, so it's redrawn every time instead of cached by hash.
+  local uncommitted = commit and require("config.working_tree").is(commit)
+  if not commit or (commit.hash == s.hash and not uncommitted) then
     return
   end
   s.hash = commit.hash
 
   local toplevel = panel.adapter and panel.adapter.ctx and panel.adapter.ctx.toplevel
-  if toplevel then
+  if uncommitted then
+    bodies[commit.hash] = commit.body or ""
+  elseif toplevel then
     fetch_bodies(toplevel, { commit.hash })
   end
 

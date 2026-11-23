@@ -7,6 +7,11 @@
 # their package folders), and every commit goes through the repo's gitleaks
 # pre-commit hook, so a secret stops that repo's sync instead of being pushed.
 # Anything that fails raises a macOS notification and leaves the repo as it was.
+#
+# A pull that adds files (a new script or nvim module from the other Mac) runs
+# bootstrap.sh's link step afterwards, since a pull only updates files that are
+# already linked. Linking is safe to repeat; anything in the way goes to
+# ~/.dotfiles-backup.
 set -uo pipefail
 export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 
@@ -42,9 +47,15 @@ EOF
     echo "$name: committed $(git diff --name-only HEAD~1 HEAD | wc -l | tr -d ' ') file(s)"
   fi
 
+  local before
+  before=$(git rev-parse HEAD)
   if ! git pull -q --rebase; then
     git rebase --abort 2>/dev/null
     echo "$name: pull --rebase failed (conflict?), nothing pushed"; return 1
+  fi
+  if [ "$before" != "$(git rev-parse HEAD)" ]; then
+    echo "$name: pulled $(git rev-list --count "$before..HEAD") commit(s)"
+    [ -n "$(git diff --name-only --diff-filter=A "$before" HEAD)" ] && NEED_LINK=1
   fi
   if [ -n "$(git rev-list '@{u}..HEAD' 2>/dev/null)" ]; then
     git push -q || { echo "$name: push failed"; return 1; }
@@ -55,9 +66,14 @@ EOF
 {
   echo "--- $(date '+%Y-%m-%d %H:%M:%S')"
   failed=()
+  NEED_LINK=
   for repo in "${REPOS[@]}"; do
     sync_repo "$repo" 2>&1 || failed+=("$(basename "$repo")")
   done
+  if [ -n "$NEED_LINK" ]; then
+    echo "new files pulled: linking"
+    "$HOME/dotfiles/bootstrap.sh" link 2>&1 | grep -v '^$' || failed+=("link")
+  fi
   [ ${#failed[@]} -eq 0 ] || notify "Sync failed for ${failed[*]}; see ~/Library/Logs/dotfiles-sync.log"
 } >>"$LOG" 2>&1
 

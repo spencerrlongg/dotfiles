@@ -1,5 +1,5 @@
--- Review notes: comments on lines of a diff in diffview (<leader>gU, <leader>gR,
--- <leader>gH, <leader>gD), kept outside the code for Claude to work through with the
+-- Review notes: comments on lines of a diff in diffview (<leader>gU, <leader>gH,
+-- <leader>gD), kept outside the code for Claude to work through with the
 -- /review-notes skill (~/.claude/skills/review-notes).
 --
 -- A note anchors to one side of a diff: the revision that side shows (a commit hash,
@@ -532,6 +532,25 @@ local function check_for_changes()
   end
 end
 
+---Re-read the notes file and redraw the notes in every diffview, plus the current
+---panel (its note counts and review marks). The review panels' `r` calls this
+---first, so it runs even when the commit list hasn't changed.
+function M.refresh()
+  local view = current_view()
+  local toplevel = view_toplevel(view)
+  local s = toplevel and stores[toplevel]
+  if s then
+    s.mtime = nil -- forces load() to read the file again
+  end
+  if view and view.panel and view.panel.render then
+    pcall(function()
+      view.panel:render()
+      view.panel:redraw()
+    end)
+  end
+  refresh_all()
+end
+
 ---------------------------------------------------------------------------
 -- Editing
 ---------------------------------------------------------------------------
@@ -607,7 +626,7 @@ local function selected_lines(visual)
 end
 
 local function not_in_diff()
-  notify("Put the cursor in a diffview diff (<leader>gU, gR, gH or gD) first", vim.log.levels.WARN)
+  notify("Put the cursor in a diffview diff (<leader>gU, gH or gD) first", vim.log.levels.WARN)
 end
 
 ---New note on the cursor line or selection; a reply when a note already covers the

@@ -1,23 +1,25 @@
--- Branch review (<leader>gR): review a branch commit by commit, like a PR before
--- there is one.
+-- Branch review (<leader>gU): review a branch commit by commit, like a PR, against
+-- the branch it came off (usually develop), pushed or not.
 --
--- <leader>gU shows what isn't pushed yet, so pushing changes what it shows. This
--- measures a branch against trunk instead, pushed or not, so a feature can be pushed
--- part-way through review and still be reviewed as a whole. The branch doesn't have
--- to be checked out.
+-- Feature branches push themselves after every commit (~/.config/git/auto-push), so
+-- the review measures against trunk rather than the upstream. Commits that aren't on
+-- the push remote yet are marked "↑ local", and uncommitted changes are the top row
+-- (working_tree.lua). The branch doesn't have to be checked out (`B`).
 --
 -- Stacked branches: when another local branch's tip is in this branch's first-parent
 -- history (feature/b was started from feature/a), that branch is the base and the review
 -- covers only this branch's own commits. `S` in the panel switches to everything
 -- since trunk. Branches under backup/ never count as a base.
 --
--- The panel is diffview's file history, so review marks (`m`, review_marks.lua) and
--- the commit details pane (commit_details.lua) work as in <leader>gU. Marks are keyed
--- by file content, so ones set from either panel show up in both.
+-- The panel is diffview's file history, with review marks (`m`, review_marks.lua) and
+-- the commit details pane (commit_details.lua). Marks are keyed by file content. When
+-- the branch has an open PR, marks sync with its "Viewed" checkboxes
+-- (github_viewed.lua): opening and `r` pull then push, `m` pushes.
 --
 -- Panel keys, on top of diffview's own:
 --   m  mark the file (or the commit's files) reviewed
---   r  refresh: new commits, a rebase, or a base branch that has since merged
+--   r  refresh: new commits, uncommitted changes, pushes, a rebase, a base branch that
+--      has since merged, and the PR's Viewed state
 --   S  this branch's own commits <-> everything since trunk
 --   H  hide / show commits whose files are all reviewed
 --   B  switch to another branch, in the same tab
@@ -28,6 +30,12 @@ local M = {}
 
 local panel_ui = require("config.diffview_panel")
 local review_marks = require("config.review_marks")
+local working_tree = require("config.working_tree")
+local github_viewed = require("config.github_viewed")
+
+-- Marker after the subject of a commit that isn't on the push remote yet.
+local UNPUSHED_ICON = "↑ local"
+local NS_UNPUSHED = vim.api.nvim_create_namespace("branch_review_unpushed")
 
 -- The branch this repo's PRs merge into, in order of preference. upstream comes before
 -- origin because in a fork (Snipe-IT) origin is the fork, whose develop can be years
@@ -74,6 +82,8 @@ local reviews = {}
 ---@field buf? integer
 ---@field win? integer
 ---@field busy? boolean
+---@field unpushed table<string, true>  hashes of commits not on the push remote yet
+---@field gh? table  GitHub PR and Viewed state (github_viewed.lua)
 
 ---@class ReviewCommit
 ---@field hash string
@@ -325,6 +335,10 @@ local function winbar(s)
     (s.stack and s.base_ref) and " (whole stack)" or "",
     ("  ·  %d commit%s  ·  %%*"):format(n, n == 1 and "" or "s"),
   }
+  local local_only = vim.tbl_count(s.unpushed or {})
+  if local_only > 0 then
+    parts[#parts + 1] = ("%%#DiagnosticWarn#%d not pushed%%*  ·  "):format(local_only)
+  end
   if total > 0 and done == total then
     parts[#parts + 1] = "%#DiagnosticOk#✓ all reviewed%*"
   else
@@ -337,6 +351,10 @@ local function winbar(s)
   if s.hide then
     parts[#parts + 1] = "  %#Comment#(reviewed commits hidden)%*"
   end
+  local pr = github_viewed.label(s)
+  if pr ~= "" then
+    parts[#parts + 1] = "  ·  " .. pr
+  end
   return table.concat(parts)
 end
 
@@ -345,6 +363,23 @@ local function update_winbar(s)
   if s.win and vim.api.nvim_win_is_valid(s.win) and vim.api.nvim_win_get_buf(s.win) == s.buf and not s.busy then
     vim.wo[s.win].winbar = winbar(s)
   end
+end
+
+---Redraws the winbar and the panel's markers, after a GitHub sync step.
+---@param s BranchReview
+local function after_sync(s)
+  update_winbar(s)
+  local view = require("diffview.lib").get_current_view()
+  if view and view.panel and view.panel.bufid == s.buf then
+    pcall(view.panel.redraw, view.panel)
+  end
+end
+
+---@param s BranchReview
+local function sync_github(s)
+  github_viewed.sync(s, function()
+    after_sync(s)
+  end)
 end
 
 ---Re-reads the branch (its tip and base may have moved) and its commits.
@@ -362,6 +397,19 @@ local function load(s)
     return false, "git log failed for " .. range_of(s)
   end
   s.commits = commits
+  s.unpushed = {}
+  -- auto-push (~/.config/git/auto-push) pushes feature branches to remote.pushDefault,
+  -- else origin. Whatever that remote's copy of the branch doesn't have is local only.
+  local remote = vim.trim(git(s.toplevel, { "config", "remote.pushDefault" }) or "")
+  remote = remote ~= "" and remote or "origin"
+  local pushed = "refs/remotes/" .. remote .. "/" .. s.name
+  local args = { "rev-list", range_of(s) }
+  if git(s.toplevel, { "rev-parse", "--verify", "--quiet", pushed }) then
+    args[#args + 1] = "^" .. pushed
+  end
+  for hash in (git(s.toplevel, args) or ""):gmatch("%x+") do
+    s.unpushed[hash] = true
+  end
   return true
 end
 
@@ -401,11 +449,13 @@ local function reload(s, msg)
     if msg then
       vim.notify(msg, vim.log.levels.INFO)
     end
+    sync_github(s)
   end, {
     title = function()
       return winbar(s)
     end,
     filter = panel_filter(s),
+    extra = working_tree.prepend,
   })
 end
 
@@ -426,6 +476,7 @@ local function panel_keys(s)
         if s.busy then
           return
         end
+        require("config.review_notes").refresh()
         local before = vim.tbl_map(function(c)
           return c.hash
         end, s.commits)
@@ -438,12 +489,13 @@ local function panel_keys(s)
         local after = vim.tbl_map(function(c)
           return c.hash
         end, s.commits)
+        -- Reload either way: the uncommitted-changes row and the pushed state can
+        -- change without any new commits.
         if vim.deep_equal(before, after) and base_before == s.base_ref then
-          update_winbar(s)
-          vim.notify("No new commits — " .. summary(s), vim.log.levels.INFO)
-          return
+          reload(s, "No new commits — " .. summary(s))
+        else
+          reload(s, "Updated — " .. summary(s))
         end
-        reload(s, "Updated — " .. summary(s))
       end,
       "Refresh branch review",
     },
@@ -503,9 +555,75 @@ local function panel_keys(s)
   }
 end
 
+---Marks the commits in a review panel that aren't pushed yet. Runs after every
+---redraw of a file history panel (installed once, by open_panel).
+local function decorate_unpushed(panel)
+  local buf = panel.bufid
+  local s = buf and reviews[buf]
+  if not (s and vim.api.nvim_buf_is_valid(buf)) then
+    return
+  end
+  vim.api.nvim_buf_clear_namespace(buf, NS_UNPUSHED, 0, -1)
+  local entries = panel.components and panel.components.log and panel.components.log.entries
+  for _, struct in ipairs(entries or {}) do
+    local entry = struct.comp.context
+    local hash = entry and entry.commit and entry.commit.hash
+    local row = struct.commit and struct.commit.comp.lstart
+    if hash and row and row >= 0 and s.unpushed[hash] then
+      vim.api.nvim_buf_set_extmark(buf, NS_UNPUSHED, row, 0, {
+        virt_text = { { UNPUSHED_ICON, "DiagnosticWarn" } },
+        virt_text_pos = "eol",
+        hl_mode = "combine",
+        priority = 80,
+      })
+    end
+  end
+end
+
+local decorator_installed = false
+local function install_decorator()
+  if decorator_installed then
+    return
+  end
+  local ok, mod = pcall(require, "diffview.scene.views.file_history.file_history_panel")
+  if not ok then
+    return
+  end
+  decorator_installed = true
+  local redraw = mod.FileHistoryPanel.redraw
+  mod.FileHistoryPanel.redraw = function(self, ...)
+    redraw(self, ...)
+    pcall(decorate_unpushed, self)
+  end
+end
+
+---Adds the uncommitted-changes row once diffview has finished its first load of
+---the panel (it streams git log in the background after opening).
+local function add_working_tree_row(view)
+  local tries = 0
+  local timer = vim.uv.new_timer()
+  timer:start(100, 100, vim.schedule_wrap(function()
+    tries = tries + 1
+    local panel = view and view.panel
+    if not panel or view.closing:check() or tries > 300 then
+      timer:stop()
+      timer:close()
+      return
+    end
+    if panel.updating or not panel.entries or #panel.entries == 0 then
+      return
+    end
+    timer:stop()
+    timer:close()
+    pcall(working_tree.inject, view)
+  end))
+end
+
 ---@param s BranchReview
 open_panel = function(s)
+  install_decorator()
   require("diffview").file_history(nil, { "-C" .. s.toplevel, "--range=" .. range_of(s) })
+  add_working_tree_row(require("diffview.lib").get_current_view())
   panel_ui.label(
     function()
       return winbar(s)
@@ -524,12 +642,16 @@ open_panel = function(s)
     end
   )
   vim.notify(summary(s), vim.log.levels.INFO)
+  sync_github(s)
 end
 
 review_marks.on_change(function()
   for buf, s in pairs(reviews) do
     if vim.api.nvim_buf_is_valid(buf) then
       update_winbar(s)
+      github_viewed.after_mark(s, function()
+        after_sync(s)
+      end)
     else
       reviews[buf] = nil
     end
@@ -592,6 +714,54 @@ local function preview_of(b, commits)
     extmarks[#extmarks + 1] = { row = row, col = age_col, end_col = #line, hl_group = "Comment" }
   end
   return { text = table.concat(lines, "\n"), extmarks = extmarks, loc = false }
+end
+
+---Opens the review for the branch checked out in `dir` (<leader>gU). Falls back to
+---the working-tree diff when the branch has no commits of its own yet, and to the
+---picker on a detached HEAD.
+---@param dir string
+function M.open_current(dir)
+  local toplevel = git(dir, { "rev-parse", "--show-toplevel" })
+  if not toplevel then
+    vim.notify("Not a git repo: " .. dir, vim.log.levels.ERROR)
+    return
+  end
+  toplevel = vim.trim(toplevel)
+  local trunk = find_trunk(toplevel)
+  if not trunk then
+    vim.notify("No trunk branch (" .. table.concat(TRUNKS, ", ") .. ") in " .. toplevel, vim.log.levels.ERROR)
+    return
+  end
+  local ref = git(toplevel, { "symbolic-ref", "--quiet", "HEAD" })
+  if not ref then
+    vim.notify("Detached HEAD: pick a branch to review", vim.log.levels.INFO)
+    M.pick(dir)
+    return
+  end
+  ref = vim.trim(ref)
+
+  ---@type BranchReview
+  local s = {
+    toplevel = toplevel,
+    trunk = trunk,
+    ref = ref,
+    name = (ref:gsub("^refs/heads/", "")),
+    stack = false,
+    hide = false,
+    commits = {},
+    unpushed = {},
+  }
+  local ok = load(s)
+  if not ok then
+    if #working_tree.changes(toplevel) > 0 then
+      vim.notify(("%s has no commits since %s yet; showing uncommitted changes"):format(s.name, trunk))
+      require("diffview").open({ "-C" .. toplevel })
+    else
+      vim.notify(("Nothing to review: %s has no commits since %s and no uncommitted changes"):format(s.name, trunk))
+    end
+    return
+  end
+  open_panel(s)
 end
 
 ---Lists branches to review and opens the chosen one. `on_choose`, when given,
@@ -682,6 +852,7 @@ function M.pick(dir, on_choose)
         stack = false,
         hide = false,
         commits = {},
+        unpushed = {},
       }
       local ok, err = load(s)
       if not ok then

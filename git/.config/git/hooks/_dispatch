@@ -13,6 +13,12 @@ if [ "$name" = pre-commit ]; then
   "$HOME/.config/git/secret-scan" || exit 1
 fi
 
+# Feature branches push themselves in the background (auto-push explains the rules).
+# stdin goes to the repo hook below: post-rewrite reads its rewritten list there.
+case "$name" in
+  post-commit | post-rewrite) "$HOME/.config/git/auto-push" "$name" </dev/null ;;
+esac
+
 repo_hook="$(git rev-parse --git-common-dir)/hooks/$name"
 if [ -x "$repo_hook" ]; then
   exec "$repo_hook" "$@"

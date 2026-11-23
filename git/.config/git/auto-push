@@ -1,0 +1,85 @@
+#!/bin/sh
+# Pushes the current feature branch after each commit, amend, or rebase, so work is
+# on GitHub even when this Mac can't be reached (working from the MacBook Air with the
+# home network down). Called by hooks/_dispatch from post-commit and post-rewrite.
+#
+#   auto-push <hook name>
+#
+# Never pushes: a detached HEAD, trunk branches (main, master, develop, ...), backup/*,
+# repos with `git config autopush.enabled false`, or anything with GIT_AUTO_PUSH=0 set.
+#
+# Pushes to remote.pushDefault, else origin, never the branch's tracking remote: in a
+# fork (Snipe-IT) a branch can track upstream/develop, and feature branches belong on
+# the fork. Every push uses --force-with-lease --force-if-includes, because amends and
+# fixup folds rewrite the branch. The lease and the includes check refuse to overwrite
+# remote commits this repo hasn't integrated, such as ones pushed from the other Mac;
+# that failure shows up as a notification and in the log.
+#
+# The push runs in the background so commits don't wait on the network. Output goes to
+# ~/.local/state/git-auto-push.log.
+set -u
+
+[ "${GIT_AUTO_PUSH:-1}" = 0 ] && exit 0
+[ "$(git config --bool autopush.enabled 2>/dev/null)" = false ] && exit 0
+
+gitdir=$(git rev-parse --absolute-git-dir 2>/dev/null) || exit 0
+toplevel=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+log="${XDG_STATE_HOME:-$HOME/.local/state}/git-auto-push.log"
+mkdir -p "$(dirname "$log")"
+
+remote=$(git config remote.pushDefault 2>/dev/null)
+if [ -z "$remote" ]; then
+  git remote | grep -qx origin || exit 0
+  remote=origin
+fi
+
+# The rest runs detached, with every descriptor pointed away from git's, so git (and
+# lazygit, which reads hook output through a pipe) returns right away.
+nohup sh -s "$toplevel" "$gitdir" "$remote" "$1" >>"$log" 2>&1 </dev/null <<'WORKER' &
+toplevel=$1 gitdir=$2 remote=$3 hook=$4
+cd "$toplevel" || exit 0
+
+# Mid-rebase, post-commit fires for every picked commit with HEAD detached. Wait for
+# the rebase to finish (post-rewrite also fires then) and push the result once.
+i=0
+while [ -d "$gitdir/rebase-merge" ] || [ -d "$gitdir/rebase-apply" ]; do
+  i=$((i + 1))
+  [ $i -gt 600 ] && exit 0
+  sleep 1
+done
+
+branch=$(git symbolic-ref --quiet --short HEAD) || exit 0
+case "$branch" in
+  main | master | develop | trunk | staging | production | release | backup/*) exit 0 ;;
+esac
+
+# One push at a time per repo; later commits wait and push whatever the branch is then.
+lock="$gitdir/auto-push.lock"
+i=0
+until mkdir "$lock" 2>/dev/null; do
+  i=$((i + 1))
+  if [ $i -gt 120 ]; then
+    rm -rf "$lock" # left behind by a killed push
+    mkdir "$lock" 2>/dev/null || exit 0
+    break
+  fi
+  sleep 1
+done
+trap 'rmdir "$lock" 2>/dev/null' EXIT
+
+set -- --force-with-lease --force-if-includes
+git rev-parse --verify --quiet '@{u}' >/dev/null || set -- "$@" --set-upstream
+
+stamp=$(date '+%Y-%m-%d %H:%M:%S')
+if out=$(git push --porcelain "$@" "$remote" "refs/heads/$branch:refs/heads/$branch" 2>&1); then
+  echo "$stamp ok   $toplevel $branch ($hook)"
+else
+  echo "$stamp FAIL $toplevel $branch ($hook)"
+  echo "$out" | sed 's/^/    /'
+  if command -v osascript >/dev/null 2>&1; then
+    repo=$(basename "$toplevel")
+    osascript -e "display notification \"Couldn't push $branch. See ~/.local/state/git-auto-push.log\" with title \"git auto-push: $repo\"" >/dev/null 2>&1
+  fi
+fi
+WORKER
+exit 0

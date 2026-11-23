@@ -1,6 +1,5 @@
--- Shared helpers for the commit panels built on diffview's file history:
--- <leader>gU (unpushed commits, keymaps.lua) and <leader>gR (branch review,
--- branch_review.lua). Labels the panel window, animates a spinner while it reloads,
+-- Helpers for the branch review panel built on diffview's file history
+-- (<leader>gU, branch_review.lua). Labels the panel window, animates a spinner while it reloads,
 -- and swaps in a new commit range without closing the tab.
 --
 -- reload_in_place uses diffview internals; diffview.nvim is pinned in
@@ -114,9 +113,11 @@ end
 -- and swaps them in only after git log finishes, so the old panel and diff stay on
 -- screen (with a spinner in the panel winbar) until then.
 -- `opts.title` is the panel's title (see PanelTitle). `opts.filter(entry)`, when
--- given, drops the commits it returns false for.
+-- given, drops the commits it returns false for. `opts.extra(view, entries)`, when
+-- given, returns the entries to show instead (branch_review adds the uncommitted
+-- changes row with it).
 -- `on_done(err)` is not called if the tab is closed while git log runs.
----@param opts { title: PanelTitle, filter?: fun(entry: table): boolean }
+---@param opts { title: PanelTitle, filter?: fun(entry: table): boolean, extra?: fun(view: table, entries: table[]): table[] }
 function M.reload_in_place(view, rev_range, on_done, opts)
   local async = require("diffview.async")
   local JobStatus = require("diffview.vcs.utils").JobStatus
@@ -167,6 +168,10 @@ function M.reload_in_place(view, rev_range, on_done, opts)
         end
       end
       entries = kept
+    end
+
+    if opts.extra then
+      entries = opts.extra(view, entries)
     end
 
     local old = panel.entries

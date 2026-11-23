@@ -262,7 +262,8 @@ step_checklist() {
   - Tailscale: note the new IP for Expo (npx expo start --host <ip>); update the host
     in Blink on the iPad
   - snipe-it-mobile: re-add the stub .git/hooks/pre-commit that runs
-    ~/.config/git/secret-scan (its own hooksPath skips the global hooks)
+    ~/.config/git/secret-scan, and post-commit + post-rewrite stubs that run
+    ~/.config/git/auto-push "$(basename "$0")" (its own hooksPath skips the global hooks)
   - Download by hand: Astropad Workbench, CARROT Weather, Festivitas, Hue Sync,
     Mirage Host, SnipeMate, StemRoller, ThreadWatch; Steam games
   - Old Mac: check every repo in ~/dev for uncommitted or unpushed work before wiping
