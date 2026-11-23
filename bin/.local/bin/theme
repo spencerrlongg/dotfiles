@@ -14,7 +14,10 @@ script renders each one into ~/.config/theme/build/<id>/ and, on `set`, points
 
 What `set` touches:
   Rex          imports build/ID/ghostty/<Name> into every connected Rex app
-               (client.theme.import), which also tints its glass and chrome
+               (client.theme.import), which also tints its glass and chrome, and
+               sets its interface options (REX_INTERFACE: Tint with Theme on, so
+               panes and chrome take the palette's colors). A palette can override
+               them with "rex": {"tint": false, "glass": true}
   Ghostty      copies the same file to ~/.config/ghostty/themes and rewrites the
                `theme =` line (Ghostty reloads on cmd+shift+, or new windows)
   Neovim       ~/.config/theme/current holds the id; nvims watch it and switch
@@ -42,6 +45,13 @@ BTOP_THEMES = HOME / ".config/btop/themes"
 BTOP_CONF = HOME / ".config/btop/btop.conf"
 CAVA_CONF = HOME / ".config/cava/config"
 KANAGAWA = {"ghostty": "Kanagawa Dragon", "rex": "merino-dark", "btop": "kanagawa-dragon"}
+# Rex interface options applied with every theme, by palette key -> Rex app setting.
+# Only tint is enforced by default; glass is here so a palette can set it.
+REX_SETTINGS = {
+    "tint": "client.setting.interface.appearance.tint",  # Tint with Theme
+    "glass": "client.setting.interface.appearance.glass",  # Use Glass for Panes
+}
+REX_INTERFACE = {"tint": True}
 os.environ["PATH"] = "/opt/homebrew/bin:" + str(HOME / ".local/bin") + ":" + os.environ.get("PATH", "")
 
 
@@ -206,7 +216,8 @@ def rex_apps():
     return [c.get("client_id") for c in rows if (c.get("info") or {}).get("kind") == "app" or c.get("kind") == "app"]
 
 
-def apply_rex(ghostty_file=None, builtin=None):
+def apply_rex(ghostty_file=None, builtin=None, interface=None):
+    interface = interface or {}
     done = 0
     for cid in rex_apps():
         if ghostty_file:
@@ -217,7 +228,16 @@ def apply_rex(ghostty_file=None, builtin=None):
             done += 1
         elif r:
             print(f"  rex: {cid}: {(r.stderr or r.stdout).strip()[:200]}")
-    print(f"  rex: {done} app(s)")
+        for key, on in interface.items():
+            action = REX_SETTINGS.get(key)
+            if not action:
+                print(f"  rex: unknown interface option {key!r}")
+                continue
+            r = run("rex", "-C", cid, "do", action, f"value={'true' if on else 'false'}")
+            if r and r.returncode:
+                print(f"  rex: {cid}: {key}: {(r.stderr or r.stdout).strip()[:200]}")
+    opts = ", ".join(f"{k} {'on' if v else 'off'}" for k, v in interface.items())
+    print(f"  rex: {done} app(s)" + (f" ({opts})" if opts else ""))
 
 
 def apply_ghostty(name, src=None):
@@ -274,7 +294,7 @@ def cmd_set(tid):
     print(f"{t['name']}:")
     print("  nvim: running instances switch now")
     gfile = out / "ghostty" / t["name"]
-    apply_rex(ghostty_file=gfile)
+    apply_rex(ghostty_file=gfile, interface={**REX_INTERFACE, **t.get("rex", {})})
     apply_ghostty(t["name"], gfile)
     apply_tmux(out / "tmux.conf")
     apply_btop(out / "btop.theme")
@@ -285,7 +305,7 @@ def cmd_reset():
         CURRENT.unlink()
     set_active(None)
     print("Kanagawa Dragon:")
-    apply_rex(builtin=KANAGAWA["rex"])
+    apply_rex(builtin=KANAGAWA["rex"], interface=REX_INTERFACE)
     apply_ghostty(KANAGAWA["ghostty"])
     apply_btop(None)
     print("  tmux: reload ~/.tmux.conf (prefix r) to get the Kanagawa colors back")

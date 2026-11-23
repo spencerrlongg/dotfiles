@@ -141,6 +141,9 @@ commit under the cursor in a details pane on the right of the panel; `j`/`k` ove
 commit rows previews theirs. `i` in the panel hides / shows the pane. Moving into
 another commit (`<Tab>`, or selecting a file) folds the others and scrolls the new one
 to the top of the panel.
+While the pane is open, commit rows leave out the branch/tag names and the author and
+date, which are in the pane's title bar. Long subjects are cut with `…` at the panel's
+edge, so the review and note counts after them stay visible.
 
 Review marks: `○` unreviewed, `✓` reviewed, with a `2/5` count on the commit row.
 Once every file in every commit is marked, a big green checkmark shows in the panel

@@ -270,9 +270,11 @@ local function accordion(panel, item)
   return entry
 end
 
----Scroll so `entry`'s commit row is the first line in the panel, even near the end of
----the list where that leaves empty rows below it: the current commit and its files
----then sit in the same place on every step.
+---Scroll the panel for `entry`, the commit the selection just moved into. If the
+---commit and all its files fit with the panel scrolled to the top, stay there, so
+---the header (path, range, "File History (n)") stays visible and nothing moves.
+---Otherwise put its commit row on the first line, even near the end of the list
+---where that leaves empty rows below it, so each later commit lands in the same place.
 ---@param panel table FileHistoryPanel
 local function pin(panel, entry)
   local win = panel.winid
@@ -285,7 +287,11 @@ local function pin(panel, entry)
     if struct.comp.context == entry then
       local height = vim.api.nvim_win_get_height(win)
       local cursor = vim.api.nvim_win_get_cursor(win)[1]
-      local topline = struct.commit.comp.lstart + 1
+      -- 1-based last line of the entry: its last file row, or the commit row when
+      -- folded (component lend is 0-based and exclusive).
+      local files = struct.files and struct.files.comp
+      local last = (files and files.lend > files.lstart) and files.lend or (struct.commit.comp.lstart + 1)
+      local topline = last <= height and 1 or (struct.commit.comp.lstart + 1)
       -- A commit with more files than the panel has rows: keep the cursor in view.
       if cursor >= topline + height then
         topline = cursor - height + 1
@@ -295,6 +301,113 @@ local function pin(panel, entry)
       end)
       return
     end
+  end
+end
+
+-- Parts of a commit row the details pane's winbar already shows, by the highlight
+-- group diffview's render.lua gives them: ref names and "author, date".
+local SHOWN_IN_PANE = { DiffviewReference = true, DiffviewFilePanelPath = true }
+
+-- Columns left free at the end of a commit row for the counts drawn after it
+-- (review_marks.lua's "2/5" or "✓", review_notes.lua's note count).
+local EOL_RESERVE = 10
+
+---Byte length of the longest prefix of `text` that fits in `width` display cells.
+local function fit(text, width)
+  local bytes, cols = 0, 0
+  for ch in text:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+    local w = vim.fn.strdisplaywidth(ch)
+    if cols + w > width then
+      break
+    end
+    cols, bytes = cols + w, bytes + #ch
+  end
+  return bytes
+end
+
+---Shorten each commit row after diffview renders it and before it's written to the
+---buffer: drop what the pane shows (while it's open), then cut the row to the
+---panel's width with "…", so the counts after it stay on screen. Works on the
+---component's text and its byte-range highlights (renderer.lua: comp.lines/comp.hl);
+---the row stays one line, so diffview's line-to-item lookup is unaffected.
+---@param panel table FileHistoryPanel
+local function shorten_rows(panel)
+  local entries = panel.components and panel.components.log and panel.components.log.entries
+  if not entries then
+    return
+  end
+  local s = panels[panel]
+  local pane_open = s and win_ok(s.win)
+  local budget
+  if win_ok(panel.winid) then
+    local info = vim.fn.getwininfo(panel.winid)[1]
+    budget = vim.api.nvim_win_get_width(panel.winid) - (info and info.textoff or 0) - EOL_RESERVE
+  end
+
+  for _, struct in ipairs(entries) do
+    local comp = struct.commit and struct.commit.comp
+    local line = comp and comp.lines and comp.lines[1]
+    if line then
+      -- Cut the ranges the pane covers, shifting the highlights after them.
+      local cuts, kept = {}, {}
+      for _, hl in ipairs(comp.hl) do
+        if hl.line_idx == 0 and pane_open and SHOWN_IN_PANE[hl.group] then
+          table.insert(cuts, hl)
+        else
+          table.insert(kept, hl)
+        end
+      end
+      table.sort(cuts, function(a, b)
+        return a.first < b.first
+      end)
+      if #cuts > 0 then
+        local pieces, pos = {}, 0
+        for _, cut in ipairs(cuts) do
+          table.insert(pieces, line:sub(pos + 1, cut.first))
+          pos = cut.last
+        end
+        table.insert(pieces, line:sub(pos + 1))
+        line = table.concat(pieces)
+        for _, hl in ipairs(kept) do
+          if hl.line_idx == 0 then
+            local shift = 0
+            for _, cut in ipairs(cuts) do
+              if cut.last <= hl.first then
+                shift = shift + (cut.last - cut.first)
+              end
+            end
+            hl.first, hl.last = hl.first - shift, hl.last - shift
+          end
+        end
+      end
+
+      -- Cut to the panel's width. The last highlight that reaches the cut carries on
+      -- over the "…", so it takes the subject's color.
+      if budget and budget > 10 and vim.fn.strdisplaywidth(line) > budget then
+        local keep = fit(line, budget - 1)
+        line = line:sub(1, keep) .. "…"
+        local clipped = {}
+        for _, hl in ipairs(kept) do
+          if hl.line_idx ~= 0 or hl.first < keep then
+            if hl.line_idx == 0 and hl.last >= keep then
+              hl.last = #line
+            end
+            table.insert(clipped, hl)
+          end
+        end
+        kept = clipped
+      end
+
+      comp.lines[1] = line
+      comp.hl = kept
+    end
+  end
+end
+
+local function rerender(panel)
+  if panel.components then
+    panel:render()
+    panel:redraw()
   end
 end
 
@@ -320,6 +433,8 @@ function M.toggle()
   else
     open_pane(panel)
   end
+  -- The rows show refs and author while the pane is hidden, and fit a new width.
+  pcall(rerender, panel)
 end
 
 local installed = false
@@ -341,6 +456,7 @@ function M.setup()
   local FileHistoryPanel = mod.FileHistoryPanel
   -- These resolve to the Panel base class through the class metatable.
   local open, close, redraw = FileHistoryPanel.open, FileHistoryPanel.close, FileHistoryPanel.redraw
+  local render = FileHistoryPanel.render
   local highlight_item = FileHistoryPanel.highlight_item
 
   FileHistoryPanel.open = function(self, ...)
@@ -351,6 +467,9 @@ function M.setup()
       vim.wo[self.winid].scrolloff = 0
     end
     pcall(open_pane, self)
+    -- Rows rendered before the pane opened still carry refs and author, cut to the
+    -- full width.
+    pcall(rerender, self)
     -- A reopened panel (<leader>b, or diffview rebuilding the layout) starts at the
     -- top of the list.
     local s = panels[self]
@@ -362,6 +481,11 @@ function M.setup()
   FileHistoryPanel.close = function(self, ...)
     pcall(close_pane, self)
     return close(self, ...)
+  end
+
+  FileHistoryPanel.render = function(self, ...)
+    render(self, ...)
+    pcall(shorten_rows, self)
   end
 
   FileHistoryPanel.redraw = function(self, ...)
@@ -403,6 +527,19 @@ function M.setup()
           -- +1 for the separator column between them.
           local total = vim.api.nvim_win_get_width(panel.winid) + vim.api.nvim_win_get_width(s.win) + 1
           vim.api.nvim_win_set_width(s.win, pane_width(total))
+        end
+      end
+    end,
+  })
+
+  -- Commit rows are cut to the panel's width, so a resized panel re-renders them.
+  vim.api.nvim_create_autocmd("WinResized", {
+    callback = function()
+      for _, win in ipairs(vim.v.event.windows or {}) do
+        for panel in pairs(panels) do
+          if panel.winid == win then
+            pcall(rerender, panel)
+          end
         end
       end
     end,

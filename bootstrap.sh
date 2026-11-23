@@ -11,7 +11,7 @@ set -euo pipefail
 DOTFILES=${DOTFILES:-$(cd "$(dirname "$0")" && pwd)}
 DOTFILES_PRIVATE=${DOTFILES_PRIVATE:-$HOME/dotfiles-private}
 PRIVATE_REPO=spencerrlongg/dotfiles-private
-PACKAGES=(zsh git tmux nvim ghostty rex term aerospace bin misc)
+PACKAGES=(zsh git tmux nvim ghostty rex term aerospace bin misc theme)
 PRIVATE_PACKAGES=(claude codex)   # plus memory, linked separately (see link_memory)
 NODE_VERSION=24
 NPM_GLOBALS=(@openai/codex corepack)
@@ -182,6 +182,10 @@ step_checklist() {
   - Rex: download Rex Beta (no cask yet) and sign in. On this Mac's own server,
     rex-start builds the sessions. On a laptop that uses another Mac as the host:
     rex hosts add, then rex -S <host> to work there (the sessions live on the host)
+  - Theme: theme set <id> (theme list shows them) builds ~/.config/theme/build and
+    active, which aren't in the repo. Run it on the host Mac after a laptop's Rex app
+    connects, too: theme set pushes the palette and Tint with Theme to every
+    connected Rex app
   - AeroSpace and Thaw: grant Accessibility when asked
   - Battery: set AlDente's charge limit to 80% (it's in the Brewfile). Use Top Up
     before days away from the desk. When 80% stops lasting the day, raise it to
