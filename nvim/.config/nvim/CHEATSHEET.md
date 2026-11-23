@@ -151,22 +151,30 @@ an unpushed commit keeps them — a mark only clears when the file itself change
 ### Review notes (comments for Claude)
 
 In any diffview diff window (`<leader>gU`, `gR`, `gH`, `gD`), comment on a line or a
-selection, then run `/review-notes` in Claude Code in the same repo. Claude works through
-the open notes and writes its reply into each one, so the replies show up here.
+selection, then press `<leader>rs` (or run `/review-notes` in Claude Code yourself). Claude
+works through the open notes and writes its reply into each one, so the replies show up
+here.
 
 | Key | Action |
 |---|---|
 | `<leader>rc` | Comment on the line (visual: on the selection); on a noted line, reply |
-| `<leader>rv` | View the whole thread (`r` in it replies) |
+| `<leader>rv` | View the whole thread (in it: `r` reply, `x` resolve / reopen) |
 | `<leader>re` | Edit your last message in the note |
 | `<leader>rr` | Resolve / reopen |
 | `<leader>rd` | Delete |
 | `<leader>rl` | List every note in the repo (waiting on you first); `<CR>` jumps to it |
+| `<leader>rs` | Send to Claude: types `/review-notes` into the Claude Code session for this repo (Rex or tmux) |
 
 In the comment editor, `<C-s>` saves and `q` cancels. A note shows as a sign down its
 lines and its latest message after the last line. Blue means open (Claude's turn), yellow
 means Claude replied (your turn), and green means resolved. File rows in the panel show
 a note count. Notes live in `.git/review-notes.json`, so they're never committed.
+
+`<leader>rs` looks for Claude Code sessions in every Rex session (or tmux pane), not
+just this one. When exactly one is working inside this repo, the command goes there.
+Otherwise you pick one, and that choice is remembered for this repo until the pane closes.
+If Claude is mid-turn, the command queues. Text already typed in Claude's input box gets
+the command appended to it.
 
 ## Gutter Signs (the column right of the line numbers)
 

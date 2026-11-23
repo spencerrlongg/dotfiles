@@ -195,6 +195,7 @@ map("n", "<leader>re", notes("edit"), { desc = "Edit my last message" })
 map("n", "<leader>rr", notes("toggle_resolved"), { desc = "Resolve / reopen note" })
 map("n", "<leader>rd", notes("delete"), { desc = "Delete note" })
 map("n", "<leader>rl", notes("list"), { desc = "List review notes" })
+map("n", "<leader>rs", notes("send_to_claude"), { desc = "Send notes to Claude (/review-notes)" })
 
 -- Navigate buffers with Ctrl+Tab / Ctrl+Shift+Tab (IDE-style tab switching)
 map("n", "<C-Tab>", "<cmd>bnext<cr>", { desc = "Next Buffer" })

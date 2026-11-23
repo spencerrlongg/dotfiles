@@ -37,11 +37,47 @@ local MAX_EXCERPT = 60
 local ICONS = { open = "\238\169\171", replied = "\238\171\135", resolved = "\238\170\178" }
 local HL = { open = "ReviewNoteOpen", replied = "ReviewNoteReplied", resolved = "ReviewNoteResolved" }
 
+---An attribute (fg/bg) of a highlight group after following links, or nil.
+local function hl_attr(name, attr)
+  local ok, hl = pcall(api.nvim_get_hl, 0, { name = name, link = false })
+  return ok and hl[attr] or nil
+end
+
+---`alpha` of color `a` over color `b`, both 0xRRGGBB.
+local function blend(a, b, alpha)
+  local out = 0
+  for _, shift in ipairs({ 16, 8, 0 }) do
+    local ca = bit.band(bit.rshift(a, shift), 0xff)
+    local cb = bit.band(bit.rshift(b, shift), 0xff)
+    out = out + bit.lshift(math.floor(ca * alpha + cb * (1 - alpha) + 0.5), shift)
+  end
+  return out
+end
+
 local function set_hl()
   api.nvim_set_hl(0, "ReviewNoteOpen", { link = "DiagnosticInfo", default = true })
   api.nvim_set_hl(0, "ReviewNoteReplied", { link = "DiagnosticWarn", default = true })
   api.nvim_set_hl(0, "ReviewNoteResolved", { link = "DiagnosticOk", default = true })
   api.nvim_set_hl(0, "ReviewNoteText", { link = "Comment", default = true })
+
+  -- Message headers in a thread: the speaker's name in their accent color over a
+  -- band of that color mixed into the float's background. Recomputed on every
+  -- ColorScheme, since the mix depends on the theme.
+  local bg = hl_attr("SnacksNormal", "bg") or hl_attr("NormalFloat", "bg") or hl_attr("Normal", "bg")
+  for who, sources in pairs({ You = { "DiagnosticInfo" }, Claude = { "Constant", "DiagnosticWarn" } }) do
+    local accent
+    for _, source in ipairs(sources) do
+      accent = accent or hl_attr(source, "fg")
+    end
+    if accent and bg then
+      api.nvim_set_hl(0, "ReviewNote" .. who, { fg = accent, bold = true })
+      api.nvim_set_hl(0, "ReviewNote" .. who .. "Band", { bg = blend(accent, bg, 0.24) })
+    else
+      api.nvim_set_hl(0, "ReviewNote" .. who, { link = sources[1] })
+      api.nvim_set_hl(0, "ReviewNote" .. who .. "Band", { link = "CursorLine" })
+    end
+  end
+  api.nvim_set_hl(0, "ReviewNoteTime", { link = "Comment", default = true })
 end
 
 local function notify(msg, level)
@@ -667,12 +703,11 @@ function M.edit()
 end
 
 ---Resolve the note under the cursor, or reopen it when it's resolved.
-function M.toggle_resolved()
-  local t, note = cursor_note()
-  if not (t and note) then
-    return
-  end
-  mutate(t.toplevel, function(data)
+---Resolve `note`, or reopen it when it's resolved.
+---@param toplevel string
+---@param note ReviewNote
+local function set_resolved(toplevel, note)
+  mutate(toplevel, function(data)
     local fresh = find(data, note.id)
     if not fresh then
       return false
@@ -680,6 +715,14 @@ function M.toggle_resolved()
     fresh.status = fresh.status == "resolved" and "open" or "resolved"
     notify(("#%d %s"):format(fresh.id, fresh.status == "resolved" and "resolved" or "reopened"))
   end)
+end
+
+---Resolve the note under the cursor, or reopen it when it's resolved.
+function M.toggle_resolved()
+  local t, note = cursor_note()
+  if t and note then
+    set_resolved(t.toplevel, note)
+  end
 end
 
 function M.delete()
@@ -701,8 +744,23 @@ function M.delete()
   end)
 end
 
----The thread as markdown, for the float and the picker preview.
+---"2026-11-23T00:38:39Z" (UTC) as local time, "2026-11-22 18:38".
+local function local_time(iso)
+  local y, mo, d, h, mi, sec = (iso or ""):match("^(%d+)-(%d+)-(%d+)T(%d+):(%d+):(%d+)Z$")
+  if not y then
+    return iso or ""
+  end
+  -- os.time reads the table as local time; shift by the UTC offset to read it as UTC.
+  local stamp = os.time({ year = y, month = mo, day = d, hour = h, min = mi, sec = sec })
+  local now = os.time()
+  local offset = os.difftime(now, os.time(os.date("!*t", now)))
+  return os.date("%Y-%m-%d %H:%M", stamp + offset)
+end
+
+---The thread as markdown, for the float and the picker preview, plus extmarks
+---(Snacks preview format: 1-based `row`) that style each message's header line.
 ---@param note ReviewNote
+---@return string[] lines, table[] marks
 local function thread_markdown(note)
   local lines = {
     ("# #%d %s · %s"):format(note.id, range_label(note), note.status),
@@ -717,13 +775,20 @@ local function thread_markdown(note)
   table.insert(lines, "```" .. (vim.filetype.match({ filename = note.path }) or ""))
   vim.list_extend(lines, note.excerpt or {})
   table.insert(lines, "```")
+  local marks = {}
   for _, msg in ipairs(note.thread or {}) do
+    local who = msg.from == "claude" and "Claude" or "You"
+    local name = "▌ " .. who
     table.insert(lines, "")
-    table.insert(lines, ("**%s** · %s"):format(msg.from == "claude" and "Claude" or "You", msg.at or ""))
+    table.insert(lines, name .. "  ·  " .. local_time(msg.at))
+    local row = #lines
+    table.insert(marks, { row = row, col = 0, line_hl_group = "ReviewNote" .. who .. "Band" })
+    table.insert(marks, { row = row, col = 0, end_col = #name, hl_group = "ReviewNote" .. who })
+    table.insert(marks, { row = row, col = #name, end_col = #lines[row], hl_group = "ReviewNoteTime" })
     table.insert(lines, "")
     vim.list_extend(lines, vim.split(msg.body or "", "\n", { plain = true }))
   end
-  return lines
+  return lines, marks
 end
 
 ---Show the whole thread of the note under the cursor.
@@ -732,16 +797,18 @@ function M.view()
   if not (t and note) then
     return
   end
-  Snacks.win({
+  local resolve_label = note.status == "resolved" and "reopen" or "resolve"
+  local lines, marks = thread_markdown(note)
+  local win = Snacks.win({
     title = (" Note #%d "):format(note.id),
-    footer = " r reply · q close ",
+    footer = (" r reply · x %s · q close "):format(resolve_label),
     width = 0.6,
     min_width = 70,
     height = 0.6,
     border = "rounded",
     enter = true,
     ft = "markdown",
-    text = thread_markdown(note),
+    text = lines,
     bo = { buftype = "nofile", bufhidden = "wipe", modifiable = false },
     wo = { wrap = true, linebreak = true, conceallevel = 2 },
     keys = {
@@ -753,8 +820,20 @@ function M.view()
         end,
         desc = "Reply",
       },
+      x = {
+        function(self)
+          self:close()
+          set_resolved(t.toplevel, note)
+        end,
+        desc = resolve_label == "reopen" and "Reopen" or "Resolve",
+      },
     },
   })
+  for _, mark in ipairs(marks) do
+    local opts = vim.deepcopy(mark)
+    opts.row, opts.col = nil, nil
+    api.nvim_buf_set_extmark(win.buf, NS, mark.row - 1, mark.col, opts)
+  end
 end
 
 ---------------------------------------------------------------------------
@@ -827,7 +906,10 @@ function M.list()
     table.insert(items, {
       note = note,
       text = ("#%d %s %s %s"):format(note.id, note.status, range_label(note), msg and msg.body or ""),
-      preview = { text = table.concat(thread_markdown(note), "\n"), ft = "markdown", loc = false },
+      preview = (function()
+        local lines, marks = thread_markdown(note)
+        return { text = table.concat(lines, "\n"), ft = "markdown", loc = false, extmarks = marks }
+      end)(),
     })
   end
   table.sort(items, function(a, b)
@@ -862,6 +944,220 @@ function M.list()
       end
     end,
   })
+end
+
+---------------------------------------------------------------------------
+-- Sending to Claude
+---------------------------------------------------------------------------
+
+-- Typed into Claude Code's prompt. The skill's name is the top autocomplete match,
+-- so one Enter runs it; if Claude is mid-turn, it queues.
+local COMMAND = "/review-notes"
+
+-- toplevel -> the pane picked last time there was more than one candidate.
+local chosen = {}
+
+---@class ClaudePane
+---@field id string Rex block ID or tmux pane ID
+---@field cwd string
+---@field title string Claude sets the terminal title to the conversation's title
+---@field session? string Rex session ID
+---@field where? string Rex session label, or tmux session:window
+
+---Run `jobs` (each takes a callback) in parallel; `done` runs once all have called back.
+---@param jobs fun(next: fun())[]
+local function parallel(jobs, done)
+  local left = #jobs
+  if left == 0 then
+    return done()
+  end
+  for _, job in ipairs(jobs) do
+    job(function()
+      left = left - 1
+      if left == 0 then
+        done()
+      end
+    end)
+  end
+end
+
+local function run(cmd, on_out)
+  vim.system(cmd, { text = true }, function(res)
+    on_out(res.code == 0 and res.stdout or "")
+  end)
+end
+
+local function decode(text)
+  local ok, value = pcall(vim.json.decode, text)
+  return ok and type(value) == "table" and value or {}
+end
+
+---Claude Code panes in this Rex server, across every session. Rex resolves a block
+---ID only within the current session unless the call names one, so each call
+---carries `-s`. Everything runs in parallel: one `process` call per block, then a
+---`title` call per Claude block.
+---@param cb fun(panes: ClaudePane[])
+local function rex_panes(cb)
+  local found = {}
+  run({ "rex", "ls", "--json" }, function(out)
+    local jobs = {}
+    for _, session in ipairs(decode(out).sessions or {}) do
+      local sid = session.session_id
+      table.insert(jobs, function(next_session)
+        run({ "rex", "block", "ls", "-s", sid, "-q", "--short=false" }, function(ids)
+          local block_jobs = {}
+          for _, id in ipairs(vim.split(vim.trim(ids), "\n", { trimempty = true })) do
+            table.insert(block_jobs, function(next_block)
+              run({ "rex", "block", "call", "-s", sid, "-b", id, "process" }, function(proc)
+                local fg = decode(proc).foreground
+                local argv0 = type(fg) == "table" and fg.argv0 or ""
+                if (argv0 == "claude" or argv0:match("/claude$")) and fg.cwd then
+                  table.insert(found, { id = id, session = sid, where = session.label, cwd = fg.cwd, title = "" })
+                end
+                next_block()
+              end)
+            end)
+          end
+          parallel(block_jobs, next_session)
+        end)
+      end)
+    end
+
+    parallel(jobs, function()
+      local title_jobs = {}
+      for _, pane in ipairs(found) do
+        table.insert(title_jobs, function(next_title)
+          run({ "rex", "block", "call", "-s", pane.session, "-b", pane.id, "title" }, function(t)
+            pane.title = decode(t).title or ""
+            next_title()
+          end)
+        end)
+      end
+      parallel(title_jobs, function()
+        cb(found)
+      end)
+    end)
+  end)
+end
+
+---Claude Code panes in this tmux server: panes with a `claude` process on their tty.
+---Two quick commands, so this runs synchronously.
+---@param cb fun(panes: ClaudePane[])
+local function tmux_panes(cb)
+  local claude_ttys = {}
+  local ps = vim.system({ "ps", "-axo", "tty=,args=" }, { text = true }):wait()
+  for _, line in ipairs(vim.split(ps.stdout or "", "\n", { trimempty = true })) do
+    local tty, argv0, arg1 = line:match("^%s*(%S+)%s+(%S+)%s*(%S*)")
+    -- Claude Code's background helpers (`claude daemon`, `claude bg-spare`, ...) can
+    -- sit on a tty too; only an interactive session takes typed input.
+    local helper = arg1 == "daemon" or arg1:match("^bg%-")
+    if tty and (argv0 == "claude" or argv0:match("/claude$")) and not helper then
+      claude_ttys[tty] = true
+    end
+  end
+
+  local fmt = "#{pane_id}\t#{pane_tty}\t#{pane_current_path}\t#{pane_title}\t#{session_name}:#{window_index}"
+  local res = vim.system({ "tmux", "list-panes", "-a", "-F", fmt }, { text = true }):wait()
+  local found = {}
+  for _, line in ipairs(vim.split(res.stdout or "", "\n", { trimempty = true })) do
+    local id, tty, cwd, title, where = unpack(vim.split(line, "\t", { plain = true }))
+    -- ps prints ttys without /dev/: "ttys003" for /dev/ttys003.
+    if tty and claude_ttys[(tty:gsub("^/dev/", ""))] then
+      table.insert(found, { id = id, cwd = cwd, title = title or "", where = where })
+    end
+  end
+  cb(found)
+end
+
+local function send_keys(mux, pane)
+  if mux == "rex" then
+    vim.system({ "rex", "block", "send", "-s", pane.session, "-b", pane.id, COMMAND }):wait()
+    -- Let the autocomplete list open before Enter picks from it.
+    vim.defer_fn(function()
+      vim.system({ "rex", "block", "send-key", "-s", pane.session, "-b", pane.id, "enter" })
+    end, 150)
+  else
+    vim.system({ "tmux", "send-keys", "-t", pane.id, "-l", COMMAND }):wait()
+    vim.defer_fn(function()
+      vim.system({ "tmux", "send-keys", "-t", pane.id, "Enter" })
+    end, 150)
+  end
+  local label = pane.title ~= "" and pane.title or pane.cwd
+  notify(("Sent %s to Claude: %s"):format(COMMAND, label))
+end
+
+local function inside(path, dir)
+  return path == dir or path:sub(1, #dir + 1) == dir .. "/"
+end
+
+---Type /review-notes into the Claude Code session working in this repo, so its
+---open notes get handled without leaving Neovim. With one Claude in the repo it goes
+---there; otherwise pick one (remembered for this repo until that pane is gone).
+function M.send_to_claude()
+  local toplevel = view_toplevel(current_view())
+  if not toplevel then
+    local out = vim.fn.systemlist({ "git", "rev-parse", "--show-toplevel" })
+    toplevel = vim.v.shell_error == 0 and out[1] or nil
+  end
+  if not toplevel then
+    return notify("Not in a git repo", vim.log.levels.WARN)
+  end
+
+  local s = load(toplevel)
+  local open = 0
+  for _, note in ipairs(s and s.data.notes or {}) do
+    if note.status == "open" then
+      open = open + 1
+    end
+  end
+  if open == 0 then
+    return notify("No open notes for Claude in " .. vim.fn.fnamemodify(toplevel, ":t"))
+  end
+
+  local mux = vim.env.REX_BLOCK and "rex" or (vim.env.TMUX and "tmux") or nil
+  if not mux then
+    return notify("Not inside Rex or tmux; run " .. COMMAND .. " in Claude yourself", vim.log.levels.WARN)
+  end
+
+  local finder = mux == "rex" and rex_panes or tmux_panes
+  finder(vim.schedule_wrap(function(panes)
+    if #panes == 0 then
+      return notify("No Claude Code session found in " .. mux, vim.log.levels.WARN)
+    end
+
+    for _, pane in ipairs(panes) do
+      if pane.id == chosen[toplevel] then
+        return send_keys(mux, pane)
+      end
+    end
+
+    local here = vim.tbl_filter(function(pane)
+      return inside(pane.cwd, toplevel)
+    end, panes)
+    if #here == 1 then
+      return send_keys(mux, here[1])
+    end
+
+    -- None in the repo (Claude started from a parent dir) or several: ask.
+    local options = #here > 1 and here or panes
+    vim.ui.select(options, {
+      prompt = ("Send %s (%d open) to which Claude?"):format(COMMAND, open),
+      format_item = function(pane)
+        local parts = {}
+        for _, part in ipairs({ pane.title, pane.where or "", vim.fn.fnamemodify(pane.cwd, ":~") }) do
+          if part ~= "" then
+            table.insert(parts, part)
+          end
+        end
+        return table.concat(parts, "  ·  ")
+      end,
+    }, function(pane)
+      if pane then
+        chosen[toplevel] = pane.id
+        send_keys(mux, pane)
+      end
+    end)
+  end))
 end
 
 ---------------------------------------------------------------------------
