@@ -316,4 +316,5 @@ end
 -- --- Other -----------------------------------------------------------------------------
 rex.bind(P .. "f", "servers_toggle")             -- this session's floating servers
 rex.bind(P .. "shift+;", "client.palette.toggle") -- : (tmux command prompt)
+rex.bind(P .. "[", "pane.copy_mode.enter")       -- tmux: copy-mode
 rex.bind(P .. "pageup", "client.scroll.page_up")  -- tmux: copy-mode -u
