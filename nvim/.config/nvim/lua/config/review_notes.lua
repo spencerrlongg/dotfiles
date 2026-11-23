@@ -1,0 +1,904 @@
+-- Review notes: comments on lines of a diff in diffview (<leader>gU, <leader>gR,
+-- <leader>gH, <leader>gD), kept outside the code for Claude to work through with the
+-- /review-notes skill (~/.claude/skills/review-notes).
+--
+-- A note anchors to one side of a diff: the revision that side shows (a commit hash,
+-- or WORKING / STAGED), the file path and a line range. It keeps a copy of the
+-- commented lines, so it still makes sense after a rebase moves or rewrites them, and
+-- a thread of messages from you and from Claude. `status` says whose turn it is:
+-- open (Claude's), replied (yours: Claude answered or asked something), resolved.
+--
+-- Notes live in <git common dir>/review-notes.json: per repo, shared by its
+-- worktrees, never committed. Claude edits the same file, so it's re-read whenever
+-- its mtime changes (focus, entering a diff window, CursorHold) and written
+-- atomically (temp file + rename) as indented JSON with a fixed key order, which
+-- keeps Claude's edits small. A file that doesn't parse is left alone: no writes
+-- until it's fixed.
+--
+-- Diff windows are aligned line for line. Virtual lines under a commented line would
+-- push that side out of step with the other, so a note shows as signs down its range
+-- plus the latest message after its last line; <leader>rv opens the whole thread.
+--
+-- Keymaps are set in keymaps.lua and work without diffview loaded. setup() runs from
+-- diffview's config and hooks its buffer events and the file-history panel (a count
+-- on each file row), the same way review_marks.lua does.
+
+local M = {}
+
+local api = vim.api
+
+local NS = api.nvim_create_namespace("review_notes")
+local NS_PANEL = api.nvim_create_namespace("review_notes_panel")
+local FILE_NAME = "review-notes.json"
+local MAX_EXCERPT = 60
+
+-- Nerd Font codicons, as bytes so editors that strip private-use characters can't
+-- blank them: comment (U+EA6B), comment-discussion (U+EAC7), check (U+EAB2).
+local ICONS = { open = "\238\169\171", replied = "\238\171\135", resolved = "\238\170\178" }
+local HL = { open = "ReviewNoteOpen", replied = "ReviewNoteReplied", resolved = "ReviewNoteResolved" }
+
+local function set_hl()
+  api.nvim_set_hl(0, "ReviewNoteOpen", { link = "DiagnosticInfo", default = true })
+  api.nvim_set_hl(0, "ReviewNoteReplied", { link = "DiagnosticWarn", default = true })
+  api.nvim_set_hl(0, "ReviewNoteResolved", { link = "DiagnosticOk", default = true })
+  api.nvim_set_hl(0, "ReviewNoteText", { link = "Comment", default = true })
+end
+
+local function notify(msg, level)
+  vim.notify(msg, level or vim.log.levels.INFO, { title = "Review notes" })
+end
+
+---------------------------------------------------------------------------
+-- Storage
+---------------------------------------------------------------------------
+
+---@class ReviewNoteMessage
+---@field from "you"|"claude"
+---@field body string
+---@field at string ISO 8601, UTC
+
+---@class ReviewNote
+---@field id integer
+---@field status "open"|"replied"|"resolved"
+---@field path string repo-relative
+---@field start integer 1-based, inclusive
+---@field end integer
+---@field side "old"|"new"
+---@field rev string commit hash, "WORKING" or "STAGED": what that side of the diff shows
+---@field commit? string the commit under review (file-history views)
+---@field subject? string that commit's subject
+---@field excerpt string[]
+---@field thread ReviewNoteMessage[]
+
+---@class ReviewNoteStore
+---@field path string
+---@field mtime? integer
+---@field data? { version: integer, notes: ReviewNote[] }
+---@field broken? boolean the file exists but didn't parse
+
+---@type table<string, ReviewNoteStore> toplevel -> store
+local stores = {}
+
+local function now()
+  return os.date("!%Y-%m-%dT%H:%M:%SZ")
+end
+
+local function mtime(path)
+  local st = vim.uv.fs_stat(path)
+  return st and (st.mtime.sec * 1000000000 + st.mtime.nsec) or nil
+end
+
+---@return ReviewNoteStore|nil store, boolean changed true when the notes were (re)read
+local function load(toplevel)
+  local s = stores[toplevel]
+  if not s then
+    local out = vim.fn.systemlist({ "git", "-C", toplevel, "rev-parse", "--path-format=absolute", "--git-common-dir" })
+    if vim.v.shell_error ~= 0 or not out[1] then
+      return nil, false
+    end
+    s = { path = out[1] .. "/" .. FILE_NAME }
+    stores[toplevel] = s
+  end
+
+  local m = mtime(s.path)
+  if s.data and m == s.mtime then
+    return s, false
+  end
+
+  local data, broken = { version = 1, notes = {} }, false
+  if m then
+    local ok, lines = pcall(vim.fn.readfile, s.path)
+    local decoded_ok, decoded = false, nil
+    if ok then
+      decoded_ok, decoded = pcall(vim.json.decode, table.concat(lines, "\n"))
+    end
+    if decoded_ok and type(decoded) == "table" and type(decoded.notes) == "table" then
+      data = decoded
+    else
+      broken = true
+    end
+  end
+
+  if broken and not s.broken then
+    notify(s.path .. " doesn't parse; notes are read-only until it's fixed", vim.log.levels.ERROR)
+  end
+  s.data, s.mtime, s.broken = data, m, broken
+  return s, true
+end
+
+-- Keys in this order first, the rest alphabetically after them.
+local KEY_ORDER = {}
+for i, key in ipairs({
+  "version",
+  "notes",
+  "id",
+  "status",
+  "path",
+  "start",
+  "end",
+  "side",
+  "rev",
+  "commit",
+  "subject",
+  "excerpt",
+  "thread",
+  "from",
+  "body",
+  "at",
+}) do
+  KEY_ORDER[key] = i
+end
+
+local function key_less(a, b)
+  local ia, ib = KEY_ORDER[a] or math.huge, KEY_ORDER[b] or math.huge
+  if ia ~= ib then
+    return ia < ib
+  end
+  return a < b
+end
+
+---JSON with 2-space indents. vim.json.encode writes "/" as "\/", which is valid but
+---noisy in paths; every "\/" in its output is that escape, so it's undone here.
+local function encode(value, indent)
+  indent = indent or ""
+  if type(value) ~= "table" then
+    return (vim.json.encode(value):gsub("\\/", "/"))
+  end
+  local inner = indent .. "  "
+  local parts = {}
+  -- An empty table can only be `notes` or `thread` here, both lists.
+  if vim.islist(value) or next(value) == nil then
+    if #value == 0 then
+      return "[]"
+    end
+    for _, item in ipairs(value) do
+      table.insert(parts, inner .. encode(item, inner))
+    end
+    return "[\n" .. table.concat(parts, ",\n") .. "\n" .. indent .. "]"
+  end
+  local keys = vim.tbl_keys(value)
+  table.sort(keys, key_less)
+  for _, key in ipairs(keys) do
+    table.insert(parts, inner .. encode(key) .. ": " .. encode(value[key], inner))
+  end
+  return "{\n" .. table.concat(parts, ",\n") .. "\n" .. indent .. "}"
+end
+
+local refresh_all
+
+---Apply `fn` to the freshest copy of the notes and write them back.
+---@param fn fun(data: { notes: ReviewNote[] }): boolean? return false to skip the write
+local function mutate(toplevel, fn)
+  local s = load(toplevel)
+  if not s then
+    notify("Not in a git repo: " .. toplevel, vim.log.levels.ERROR)
+    return false
+  end
+  if s.broken then
+    notify(s.path .. " doesn't parse; fix or delete it first", vim.log.levels.ERROR)
+    return false
+  end
+  if fn(s.data) == false then
+    return false
+  end
+
+  local tmp = s.path .. ".tmp"
+  local fd = io.open(tmp, "w")
+  if not fd then
+    notify("Can't write " .. tmp, vim.log.levels.ERROR)
+    return false
+  end
+  fd:write(encode(s.data), "\n")
+  fd:close()
+  local ok, err = os.rename(tmp, s.path)
+  if not ok then
+    notify("Can't write " .. s.path .. ": " .. tostring(err), vim.log.levels.ERROR)
+    return false
+  end
+  s.mtime = mtime(s.path)
+  refresh_all()
+  return true
+end
+
+---------------------------------------------------------------------------
+-- Diff windows
+---------------------------------------------------------------------------
+
+local function current_view()
+  if not package.loaded["diffview"] then
+    return nil
+  end
+  local ok, lib = pcall(require, "diffview.lib")
+  return ok and lib.get_current_view() or nil
+end
+
+local function view_toplevel(view)
+  return view and view.adapter and view.adapter.ctx and view.adapter.ctx.toplevel
+end
+
+---What a diff side shows, as stored in a note's `rev`.
+local function rev_id(file)
+  local rev = file and file.rev
+  if not rev or file.nulled then
+    return nil
+  end
+  local RevType = require("diffview.vcs.rev").RevType
+  if rev.type == RevType.COMMIT then
+    return rev.commit
+  elseif rev.type == RevType.LOCAL then
+    return "WORKING"
+  elseif rev.type == RevType.STAGE then
+    return "STAGED"
+  end
+end
+
+---@class ReviewTarget
+---@field view table
+---@field file table diffview File
+---@field toplevel string
+---@field rev string
+---@field side "old"|"new"
+---@field commit? string
+---@field subject? string
+
+---The diff side in the current window, or nil when the cursor isn't in one.
+---@return ReviewTarget|nil
+local function target(win)
+  local view = current_view()
+  local layout = view and view.cur_layout
+  if not layout then
+    return nil
+  end
+  win = win or api.nvim_get_current_win()
+  for _, w in ipairs(layout.windows) do
+    if w.id == win and w.file then
+      local rev = rev_id(w.file)
+      local toplevel = view_toplevel(view)
+      if not rev or not toplevel then
+        return nil
+      end
+      local entry = view.panel and view.panel.cur_item and view.panel.cur_item[1]
+      local commit = entry and entry.commit
+      return {
+        view = view,
+        file = w.file,
+        toplevel = toplevel,
+        rev = rev,
+        side = w.file.symbol == "a" and "old" or "new",
+        commit = commit and commit.hash or nil,
+        subject = commit and commit.subject or nil,
+      }
+    end
+  end
+end
+
+---@return ReviewNote[]
+local function notes_on(toplevel, path, rev)
+  local s = load(toplevel)
+  local out = {}
+  for _, note in ipairs(s and s.data.notes or {}) do
+    if note.path == path and note.rev == rev then
+      table.insert(out, note)
+    end
+  end
+  return out
+end
+
+---The note whose range covers `line` (the narrowest, when they overlap).
+---@param t ReviewTarget
+---@return ReviewNote|nil
+local function note_at(t, line)
+  local best
+  for _, note in ipairs(notes_on(t.toplevel, t.file.path, t.rev)) do
+    if note.start <= line and line <= note["end"] then
+      if not best or (note["end"] - note.start) < (best["end"] - best.start) then
+        best = note
+      end
+    end
+  end
+  return best
+end
+
+local function first_line(text)
+  return (text or ""):match("^[^\n]*") or ""
+end
+
+local function truncate(text, width)
+  if vim.fn.strdisplaywidth(text) <= width then
+    return text
+  end
+  return vim.fn.strcharpart(text, 0, width - 1) .. "…"
+end
+
+local function latest(note)
+  local thread = note.thread or {}
+  return thread[#thread]
+end
+
+---Signs down each note's range and its latest message after the last line.
+local function decorate_buf(bufnr, toplevel, path, rev)
+  if not api.nvim_buf_is_valid(bufnr) then
+    return
+  end
+  api.nvim_buf_clear_namespace(bufnr, NS, 0, -1)
+  local count = api.nvim_buf_line_count(bufnr)
+
+  for _, note in ipairs(notes_on(toplevel, path, rev)) do
+    local status = HL[note.status] and note.status or "open"
+    local hl = HL[status]
+    -- A working-tree file can have shrunk since the note was made.
+    local first = math.min(note.start, count)
+    local last = math.max(first, math.min(note["end"], count))
+    for line = first, last do
+      local sign = line == first and ICONS[status] or (line == last and "╰" or "│")
+      api.nvim_buf_set_extmark(bufnr, NS, line - 1, 0, { sign_text = sign, sign_hl_group = hl, priority = 20 })
+    end
+
+    local msg = latest(note)
+    local text = msg and first_line(msg.body) or ""
+    if msg and msg.from == "claude" then
+      text = "Claude: " .. text
+    end
+    local chunks = { { "  #" .. note.id .. " ", hl } }
+    table.insert(chunks, { truncate(text, 80), "ReviewNoteText" })
+    if #(note.thread or {}) > 1 then
+      table.insert(chunks, { (" (%d)"):format(#note.thread), "ReviewNoteText" })
+    end
+    api.nvim_buf_set_extmark(bufnr, NS, last - 1, 0, {
+      virt_text = chunks,
+      virt_text_pos = "eol",
+      hl_mode = "combine",
+      priority = 20,
+    })
+  end
+end
+
+local function decorate_view(view)
+  local layout = view and view.cur_layout
+  local toplevel = view_toplevel(view)
+  if not layout or not toplevel then
+    return
+  end
+  for _, w in ipairs(layout.windows) do
+    local rev = rev_id(w.file)
+    if rev and w.file.bufnr then
+      pcall(decorate_buf, w.file.bufnr, toplevel, w.file.path, rev)
+    end
+  end
+end
+
+---------------------------------------------------------------------------
+-- File-history panel
+---------------------------------------------------------------------------
+
+-- Which status a file row shows when its notes differ: the one that needs you first.
+local STATUS_RANK = { replied = 1, open = 2, resolved = 3 }
+
+---Number of notes on each file of each commit: "<commit>:<path>" -> { n, status }.
+local function panel_counts(toplevel)
+  local s = load(toplevel)
+  local counts = {}
+  for _, note in ipairs(s and s.data.notes or {}) do
+    local key = (note.commit or note.rev) .. ":" .. note.path
+    local c = counts[key] or { n = 0 }
+    c.n = c.n + 1
+    if not c.status or (STATUS_RANK[note.status] or 9) < (STATUS_RANK[c.status] or 9) then
+      c.status = note.status
+    end
+    counts[key] = c
+  end
+  return counts
+end
+
+local function decorate_panel(panel)
+  local buf = panel.bufid
+  if not buf or not api.nvim_buf_is_valid(buf) then
+    return
+  end
+  api.nvim_buf_clear_namespace(buf, NS_PANEL, 0, -1)
+
+  local toplevel = panel.adapter and panel.adapter.ctx and panel.adapter.ctx.toplevel
+  local entries = panel.components and panel.components.log and panel.components.log.entries
+  if not toplevel or not entries then
+    return
+  end
+
+  local counts = panel_counts(toplevel)
+  if next(counts) == nil then
+    return
+  end
+  local line_count = api.nvim_buf_line_count(buf)
+
+  local function mark(row, c)
+    if row >= 0 and row < line_count then
+      local status = HL[c.status] and c.status or "open"
+      api.nvim_buf_set_extmark(buf, NS_PANEL, row, 0, {
+        virt_text = { { ICONS[status] .. " " .. c.n, HL[status] } },
+        virt_text_pos = "eol",
+        hl_mode = "combine",
+        priority = 90,
+      })
+    end
+  end
+
+  for _, struct in ipairs(entries) do
+    local entry = struct.comp.context
+    local hash = entry and entry.commit and entry.commit.hash
+    if hash then
+      if entry.single_file then
+        local c = entry.files[1] and counts[hash .. ":" .. entry.files[1].path]
+        if c then
+          mark(struct.commit.comp.lstart, c)
+        end
+      else
+        local files = struct.files.comp
+        for i, file in ipairs(entry.files) do
+          local c = counts[hash .. ":" .. file.path]
+          local row = files.lstart + i - 1
+          if c and files.lstart >= 0 and row < files.lend then
+            mark(row, c)
+          end
+        end
+      end
+    end
+  end
+end
+
+---Redraw every open diffview's notes. Called after each write and whenever the
+---file changed underneath (Claude replied).
+refresh_all = function()
+  if not package.loaded["diffview"] then
+    return
+  end
+  local ok, lib = pcall(require, "diffview.lib")
+  if not ok then
+    return
+  end
+  for _, view in ipairs(lib.views or {}) do
+    decorate_view(view)
+    if view.panel and view.panel.components and view.panel.components.log then
+      pcall(decorate_panel, view.panel)
+    end
+  end
+end
+
+---Pick up edits Claude made to the notes file.
+local function check_for_changes()
+  local toplevel = view_toplevel(current_view())
+  if toplevel then
+    local _, changed = load(toplevel)
+    if changed then
+      refresh_all()
+    end
+  end
+end
+
+---------------------------------------------------------------------------
+-- Editing
+---------------------------------------------------------------------------
+
+---A small markdown float for writing a message. <C-s> saves, q cancels.
+---@param on_save fun(text: string)
+local function editor(title, lines, on_save)
+  local empty = #lines == 0 or (#lines == 1 and lines[1] == "")
+  local function save(self)
+    local text = vim.trim(table.concat(api.nvim_buf_get_lines(self.buf, 0, -1, false), "\n"))
+    vim.cmd.stopinsert()
+    self:close()
+    if text ~= "" then
+      on_save(text)
+    end
+  end
+  Snacks.win({
+    title = " " .. title .. " ",
+    footer = " <C-s> save · q cancel ",
+    width = 0.5,
+    min_width = 60,
+    height = 0.3,
+    min_height = 8,
+    border = "rounded",
+    enter = true,
+    ft = "markdown",
+    text = empty and { "" } or lines,
+    bo = { buftype = "nofile", bufhidden = "wipe", swapfile = false },
+    wo = { wrap = true, linebreak = true, spell = true },
+    keys = {
+      q = "close",
+      ["<C-s>"] = { save, mode = { "n", "i" }, desc = "Save" },
+    },
+  })
+  if empty then
+    vim.cmd.startinsert()
+  end
+end
+
+local function range_label(note)
+  local range = note.start == note["end"] and tostring(note.start) or (note.start .. "-" .. note["end"])
+  return note.path .. ":" .. range
+end
+
+---The cursor line, or the lines of the visual selection that was just made.
+local function selected_lines(visual)
+  if visual then
+    -- `'<`/`'>` are only set once visual mode is left.
+    vim.cmd([[execute "normal! \<Esc>"]])
+    local a, b = vim.fn.line("'<"), vim.fn.line("'>")
+    return math.min(a, b), math.max(a, b)
+  end
+  local line = vim.fn.line(".")
+  return line, line
+end
+
+local function not_in_diff()
+  notify("Put the cursor in a diffview diff (<leader>gU, gR, gH or gD) first", vim.log.levels.WARN)
+end
+
+---New note on the cursor line or selection; a reply when a note already covers the
+---cursor line (normal mode).
+---@param visual? boolean
+function M.comment(visual)
+  local t = target()
+  if not t then
+    return not_in_diff()
+  end
+  local first, last = selected_lines(visual)
+
+  local existing = not visual and note_at(t, first)
+  if existing then
+    return M.reply(existing, t)
+  end
+
+  local excerpt = api.nvim_buf_get_lines(0, first - 1, math.min(last, first + MAX_EXCERPT - 1), false)
+  local label = range_label({ path = t.file.path, start = first, ["end"] = last })
+  editor("Comment · " .. label, {}, function(text)
+    mutate(t.toplevel, function(data)
+      local id = 0
+      for _, note in ipairs(data.notes) do
+        id = math.max(id, note.id or 0)
+      end
+      table.insert(data.notes, {
+        id = id + 1,
+        status = "open",
+        path = t.file.path,
+        start = first,
+        ["end"] = last,
+        side = t.side,
+        rev = t.rev,
+        commit = t.commit,
+        subject = t.subject,
+        excerpt = excerpt,
+        thread = { { from = "you", body = text, at = now() } },
+      })
+    end)
+  end)
+end
+
+---Find a note by id in freshly loaded data.
+local function find(data, id)
+  for i, note in ipairs(data.notes) do
+    if note.id == id then
+      return note, i
+    end
+  end
+end
+
+---@param note ReviewNote
+---@param t ReviewTarget
+function M.reply(note, t)
+  editor(("Reply · #%d %s"):format(note.id, range_label(note)), {}, function(text)
+    mutate(t.toplevel, function(data)
+      local fresh = find(data, note.id)
+      if not fresh then
+        notify("Note #" .. note.id .. " is gone", vim.log.levels.WARN)
+        return false
+      end
+      fresh.thread = fresh.thread or {}
+      table.insert(fresh.thread, { from = "you", body = text, at = now() })
+      fresh.status = "open"
+    end)
+  end)
+end
+
+---@return ReviewTarget|nil, ReviewNote|nil
+local function cursor_note()
+  local t = target()
+  if not t then
+    not_in_diff()
+    return nil, nil
+  end
+  local note = note_at(t, vim.fn.line("."))
+  if not note then
+    notify("No note on this line")
+  end
+  return t, note
+end
+
+---Edit your latest message in the note under the cursor.
+function M.edit()
+  local t, note = cursor_note()
+  if not (t and note) then
+    return
+  end
+  local index
+  for i = #(note.thread or {}), 1, -1 do
+    if note.thread[i].from == "you" then
+      index = i
+      break
+    end
+  end
+  if not index then
+    return notify("Nothing of yours to edit in #" .. note.id)
+  end
+  local lines = vim.split(note.thread[index].body, "\n", { plain = true })
+  editor(("Edit · #%d %s"):format(note.id, range_label(note)), lines, function(text)
+    mutate(t.toplevel, function(data)
+      local fresh = find(data, note.id)
+      if not (fresh and fresh.thread and fresh.thread[index]) then
+        return false
+      end
+      fresh.thread[index].body = text
+      fresh.thread[index].at = now()
+      -- Editing the last word puts the note back in Claude's court.
+      if index == #fresh.thread then
+        fresh.status = "open"
+      end
+    end)
+  end)
+end
+
+---Resolve the note under the cursor, or reopen it when it's resolved.
+function M.toggle_resolved()
+  local t, note = cursor_note()
+  if not (t and note) then
+    return
+  end
+  mutate(t.toplevel, function(data)
+    local fresh = find(data, note.id)
+    if not fresh then
+      return false
+    end
+    fresh.status = fresh.status == "resolved" and "open" or "resolved"
+    notify(("#%d %s"):format(fresh.id, fresh.status == "resolved" and "resolved" or "reopened"))
+  end)
+end
+
+function M.delete()
+  local t, note = cursor_note()
+  if not (t and note) then
+    return
+  end
+  local msg = latest(note)
+  local prompt = ("Delete #%d (%s)?"):format(note.id, truncate(first_line(msg and msg.body), 50))
+  if vim.fn.confirm(prompt, "&Yes\n&No", 2) ~= 1 then
+    return
+  end
+  mutate(t.toplevel, function(data)
+    local _, index = find(data, note.id)
+    if not index then
+      return false
+    end
+    table.remove(data.notes, index)
+  end)
+end
+
+---The thread as markdown, for the float and the picker preview.
+---@param note ReviewNote
+local function thread_markdown(note)
+  local lines = {
+    ("# #%d %s · %s"):format(note.id, range_label(note), note.status),
+    "",
+  }
+  if note.subject then
+    table.insert(lines, ("_%s side of %s: %s_"):format(note.side, (note.commit or note.rev):sub(1, 8), note.subject))
+  else
+    table.insert(lines, ("_%s side (%s)_"):format(note.side, note.rev:sub(1, 8)))
+  end
+  table.insert(lines, "")
+  table.insert(lines, "```" .. (vim.filetype.match({ filename = note.path }) or ""))
+  vim.list_extend(lines, note.excerpt or {})
+  table.insert(lines, "```")
+  for _, msg in ipairs(note.thread or {}) do
+    table.insert(lines, "")
+    table.insert(lines, ("**%s** · %s"):format(msg.from == "claude" and "Claude" or "You", msg.at or ""))
+    table.insert(lines, "")
+    vim.list_extend(lines, vim.split(msg.body or "", "\n", { plain = true }))
+  end
+  return lines
+end
+
+---Show the whole thread of the note under the cursor.
+function M.view()
+  local t, note = cursor_note()
+  if not (t and note) then
+    return
+  end
+  Snacks.win({
+    title = (" Note #%d "):format(note.id),
+    footer = " r reply · q close ",
+    width = 0.6,
+    min_width = 70,
+    height = 0.6,
+    border = "rounded",
+    enter = true,
+    ft = "markdown",
+    text = thread_markdown(note),
+    bo = { buftype = "nofile", bufhidden = "wipe", modifiable = false },
+    wo = { wrap = true, linebreak = true, conceallevel = 2 },
+    keys = {
+      q = "close",
+      r = {
+        function(self)
+          self:close()
+          M.reply(note, t)
+        end,
+        desc = "Reply",
+      },
+    },
+  })
+end
+
+---------------------------------------------------------------------------
+-- List
+---------------------------------------------------------------------------
+
+---Open the note's diff in the current view and put the cursor on it. Working-tree
+---notes open the file itself; notes on commits outside this view only say where
+---they are.
+---@param note ReviewNote
+local function jump(note, toplevel)
+  if note.rev == "WORKING" then
+    vim.cmd.edit(vim.fn.fnameescape(toplevel .. "/" .. note.path))
+    pcall(api.nvim_win_set_cursor, 0, { note.start, 0 })
+    return
+  end
+
+  local view = current_view()
+  local panel = view and view.panel
+  local commit = note.commit or note.rev
+  local file
+  for _, entry in ipairs(panel and panel.entries or {}) do
+    if entry.commit and entry.commit.hash == commit then
+      for _, f in ipairs(entry.files) do
+        if f.path == note.path then
+          file = f
+        end
+      end
+    end
+  end
+  if not file then
+    notify(("#%d is on %s in %s, which isn't in this view"):format(note.id, note.path, commit:sub(1, 8)))
+    return
+  end
+
+  local async = require("diffview.async")
+  async.void(function()
+    async.await(view:set_file(file))
+    async.await(async.scheduler())
+    local symbol = note.side == "old" and "a" or "b"
+    for _, w in ipairs(view.cur_layout.windows) do
+      if w.file and w.file.symbol == symbol and api.nvim_win_is_valid(w.id) then
+        api.nvim_set_current_win(w.id)
+        pcall(api.nvim_win_set_cursor, w.id, { note.start, 0 })
+        vim.cmd("normal! zz")
+      end
+    end
+  end)()
+end
+
+---Pick from every note in the repo; replied ones (waiting on you) first.
+function M.list()
+  local toplevel = view_toplevel(current_view())
+  if not toplevel then
+    local out = vim.fn.systemlist({ "git", "rev-parse", "--show-toplevel" })
+    toplevel = vim.v.shell_error == 0 and out[1] or nil
+  end
+  if not toplevel then
+    return notify("Not in a git repo", vim.log.levels.WARN)
+  end
+  local s = load(toplevel)
+  local notes = s and s.data.notes or {}
+  if #notes == 0 then
+    return notify("No review notes in " .. toplevel)
+  end
+
+  local items = {}
+  for _, note in ipairs(notes) do
+    local msg = latest(note)
+    table.insert(items, {
+      note = note,
+      text = ("#%d %s %s %s"):format(note.id, note.status, range_label(note), msg and msg.body or ""),
+      preview = { text = table.concat(thread_markdown(note), "\n"), ft = "markdown", loc = false },
+    })
+  end
+  table.sort(items, function(a, b)
+    local ra, rb = STATUS_RANK[a.note.status] or 9, STATUS_RANK[b.note.status] or 9
+    if ra ~= rb then
+      return ra < rb
+    end
+    return a.note.id < b.note.id
+  end)
+
+  Snacks.picker.pick({
+    title = "Review notes",
+    items = items,
+    preview = "preview",
+    format = function(item)
+      local note = item.note
+      local status = HL[note.status] and note.status or "open"
+      local msg = latest(note)
+      return {
+        { ICONS[status] .. " ", HL[status] },
+        { ("#%-3d "):format(note.id), HL[status] },
+        { range_label(note) .. "  ", "SnacksPickerFile" },
+        { first_line(msg and msg.body), "ReviewNoteText" },
+      }
+    end,
+    confirm = function(picker, item)
+      picker:close()
+      if item then
+        vim.schedule(function()
+          jump(item.note, toplevel)
+        end)
+      end
+    end,
+  })
+end
+
+---------------------------------------------------------------------------
+-- Setup
+---------------------------------------------------------------------------
+
+local installed = false
+
+function M.setup()
+  if installed then
+    return
+  end
+  installed = true
+
+  set_hl()
+  local group = api.nvim_create_augroup("review_notes", { clear = true })
+  api.nvim_create_autocmd("ColorScheme", { group = group, callback = set_hl })
+  api.nvim_create_autocmd({ "FocusGained", "CursorHold" }, { group = group, callback = check_for_changes })
+
+  -- Fires each time diffview shows a file in one of its diff windows.
+  DiffviewGlobal.emitter:on("diff_buf_win_enter", function(_, _, winid)
+    local t = target(winid)
+    if t then
+      check_for_changes()
+      pcall(decorate_buf, t.file.bufnr, t.toplevel, t.file.path, t.rev)
+    end
+  end)
+
+  local ok, mod = pcall(require, "diffview.scene.views.file_history.file_history_panel")
+  if ok then
+    local FileHistoryPanel = mod.FileHistoryPanel
+    local redraw = FileHistoryPanel.redraw
+    FileHistoryPanel.redraw = function(self, ...)
+      redraw(self, ...)
+      pcall(decorate_panel, self)
+    end
+  end
+end
+
+return M

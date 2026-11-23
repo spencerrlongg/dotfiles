@@ -232,6 +232,7 @@ return {
       -- out of lazy loading for every session.
       require("config.review_marks").setup()
       require("config.commit_details").setup()
+      require("config.review_notes").setup()
     end,
   },
 

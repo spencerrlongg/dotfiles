@@ -136,14 +136,37 @@ Outside a diff, `]c` is LazyVim's "next class"; it only means "next change" in d
 Diffview opens in its own tabpage — after `gf`, use `gt`/`gT` (see Buffers vs Tabpages
 vs Windows above) to get back to it.
 
-Expanding a commit in the panel shows its full message (body, plus the whole subject
-when diffview cut it at 72 characters) between the commit row and its files.
+The commit panels (`<leader>gU`, `<leader>gR`, `<leader>gH`) show the full message of the
+commit under the cursor in a details pane on the right of the panel; `j`/`k` over
+commit rows previews theirs. `i` in the panel hides / shows the pane. Moving into
+another commit (`<Tab>`, or selecting a file) folds the others and scrolls the new one
+to the top of the panel.
 
 Review marks: `○` unreviewed, `✓` reviewed, with a `2/5` count on the commit row.
 Once every file in every commit is marked, a big green checkmark shows in the panel
 header and the title reads `✓ all reviewed`.
 They persist across restarts and are keyed to file *content*, so amending or rebasing
 an unpushed commit keeps them — a mark only clears when the file itself changes.
+
+### Review notes (comments for Claude)
+
+In any diffview diff window (`<leader>gU`, `gR`, `gH`, `gD`), comment on a line or a
+selection, then run `/review-notes` in Claude Code in the same repo. Claude works through
+the open notes and writes its reply into each one, so the replies show up here.
+
+| Key | Action |
+|---|---|
+| `<leader>rc` | Comment on the line (visual: on the selection); on a noted line, reply |
+| `<leader>rv` | View the whole thread (`r` in it replies) |
+| `<leader>re` | Edit your last message in the note |
+| `<leader>rr` | Resolve / reopen |
+| `<leader>rd` | Delete |
+| `<leader>rl` | List every note in the repo (waiting on you first); `<CR>` jumps to it |
+
+In the comment editor, `<C-s>` saves and `q` cancels. A note shows as a sign down its
+lines and its latest message after the last line. Blue means open (Claude's turn), yellow
+means Claude replied (your turn), and green means resolved. File rows in the panel show
+a note count. Notes live in `.git/review-notes.json`, so they're never committed.
 
 ## Gutter Signs (the column right of the line numbers)
 

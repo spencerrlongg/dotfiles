@@ -12,8 +12,8 @@
 -- since trunk. Branches under backup/ never count as a base.
 --
 -- The panel is diffview's file history, so review marks (`m`, review_marks.lua) and
--- commit bodies (commit_details.lua) work as in <leader>gU. Marks are keyed by file
--- content, so ones set from either panel show up in both.
+-- the commit details pane (commit_details.lua) work as in <leader>gU. Marks are keyed
+-- by file content, so ones set from either panel show up in both.
 --
 -- Panel keys, on top of diffview's own:
 --   m  mark the file (or the commit's files) reviewed

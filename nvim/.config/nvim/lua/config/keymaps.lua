@@ -177,6 +177,25 @@ map("n", "<leader>gR", function()
 end, { desc = "Branch Review" })
 map("n", "<leader>gX", "<cmd>DiffviewClose<cr>", { desc = "Close Diff View" })
 
+-- Review notes: comments on diff lines for Claude's /review-notes skill
+-- (review_notes.lua). They work in any diffview diff window.
+local function notes(fn, ...)
+  local args = { ... }
+  return function()
+    require("config.review_notes")[fn](unpack(args))
+  end
+end
+pcall(function()
+  require("which-key").add({ { "<leader>r", group = "review notes" } })
+end)
+map("n", "<leader>rc", notes("comment", false), { desc = "Comment on line (reply if noted)" })
+map("x", "<leader>rc", notes("comment", true), { desc = "Comment on selection" })
+map("n", "<leader>rv", notes("view"), { desc = "View note thread" })
+map("n", "<leader>re", notes("edit"), { desc = "Edit my last message" })
+map("n", "<leader>rr", notes("toggle_resolved"), { desc = "Resolve / reopen note" })
+map("n", "<leader>rd", notes("delete"), { desc = "Delete note" })
+map("n", "<leader>rl", notes("list"), { desc = "List review notes" })
+
 -- Navigate buffers with Ctrl+Tab / Ctrl+Shift+Tab (IDE-style tab switching)
 map("n", "<C-Tab>", "<cmd>bnext<cr>", { desc = "Next Buffer" })
 map("n", "<C-S-Tab>", "<cmd>bprevious<cr>", { desc = "Prev Buffer" })

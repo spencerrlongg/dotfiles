@@ -1,37 +1,68 @@
--- Commit message bodies and separators for diffview's file-history panel (<leader>gU,
--- <leader>gR).
+-- Commit details pane and steady scrolling for diffview's file-history panel
+-- (<leader>gU, <leader>gR, and <leader>gH for a single file).
 --
--- Diffview only reads each commit's subject from git log (and truncates it to 72
--- bytes), so an expanded commit shows nothing of its body. This draws the full
--- message as virtual lines between an expanded commit row and its file rows, and a
--- faint rule above every commit after the first so neighbouring commits read as
--- separate blocks.
+-- The panel is a short split along the bottom of the tab. Drawing an expanded
+-- commit's message inside it let a long body fill the whole panel, and <tab> left
+-- every commit it passed through expanded, so the file rows moved by a different
+-- amount on each step. Here the panel holds only commit and file rows, and the full
+-- message of the commit under the cursor goes in a pane split off the panel's right
+-- side, the way PhpStorm's Log tab keeps Commit Details next to Changed Files. The
+-- diff windows above keep their full width and height.
 --
--- Virtual lines don't change the buffer's real lines, so diffview's cursor-to-item
--- lookup and the review marks (review_marks.lua) keep working untouched. Like
--- review_marks.lua, this wraps the panel's redraw and reads the line ranges the
--- renderer records on each component; diffview.nvim is pinned in lazy-lock.json, so
--- those internals only move when the lock file does.
+-- When <tab>/<s-tab> or selecting a file moves into another commit, every other
+-- commit folds and the new one is scrolled to the top of the panel (accordion), so
+-- each step moves the list the same way.
+--
+-- The pane is opened right after the panel window and closed right before it.
+-- diffview closes and reopens the panel whenever it rebuilds the diff layout, and a
+-- pane left open then would take the panel's place across the bottom of the tab.
+-- `i` in the panel hides or shows it.
+--
+-- Like review_marks.lua, this wraps FileHistoryPanel methods and reads the line
+-- ranges the renderer records on each component (render.lua); diffview.nvim is
+-- pinned in lazy-lock.json, so those internals only move when the lock file does.
 
 local M = {}
 
 local NS = vim.api.nvim_create_namespace("commit_details")
 
--- diffview's render.lua cuts subjects longer than this many bytes.
-local SUBJECT_MAX = 72
-
--- File rows are prefixed with this tree guide (render.lua), so the body lines reuse
--- it to stay inside the same tree.
-local GUIDE = "│   "
+-- Share of the panel's width the pane takes, kept within these column bounds.
+local WIDTH_RATIO = 0.45
+local MIN_WIDTH, MAX_WIDTH = 40, 100
 
 -- commit hash -> message body (may be ""). Hashes are immutable, so an entry is good
 -- for the rest of the session.
 local bodies = {}
 
+---@class CommitDetailsState
+---@field win? integer   the details pane
+---@field buf? integer
+---@field hash? string   the commit the pane shows
+---@field hidden? boolean turned off with `i`; stays off for this panel
+---@field active? table  the LogEntry the accordion last opened
+
+-- FileHistoryPanel -> state. Weak keys, so a closed view's panel can be collected.
+---@type table<table, CommitDetailsState>
+local panels = setmetatable({}, { __mode = "k" })
+
+local function pstate(panel)
+  local s = panels[panel]
+  if not s then
+    s = {}
+    panels[panel] = s
+  end
+  return s
+end
+
+local function win_ok(win)
+  return win ~= nil and vim.api.nvim_win_is_valid(win)
+end
+
 local function set_hl()
-  vim.api.nvim_set_hl(0, "CommitDetailsBody", { link = "DiffviewFilePanelFileName", default = true })
-  vim.api.nvim_set_hl(0, "CommitDetailsGuide", { link = "DiffviewNonText", default = true })
-  vim.api.nvim_set_hl(0, "CommitDetailsSeparator", { link = "DiffviewNonText", default = true })
+  vim.api.nvim_set_hl(0, "CommitDetailsSubject", { link = "DiffviewFilePanelTitle", default = true })
+  vim.api.nvim_set_hl(0, "CommitDetailsMeta", { link = "DiffviewNonText", default = true })
+  vim.api.nvim_set_hl(0, "CommitDetailsHash", { link = "DiffviewHash", default = true })
+  vim.api.nvim_set_hl(0, "CommitDetailsRef", { link = "DiffviewReference", default = true })
 end
 
 ---Fetch the bodies of every commit in `hashes` that isn't cached yet, in one git call.
@@ -71,118 +102,223 @@ local function fetch_bodies(toplevel, hashes)
   end
 end
 
----Word-wrap one line to `width` display cells. Words longer than the width (URLs)
----are left whole; Neovim cuts the virtual line at the window edge.
----@return string[]
-local function wrap(line, width)
-  if vim.fn.strdisplaywidth(line) <= width then
-    return { line }
-  end
-
-  local out, cur = {}, ""
-  for word in line:gmatch("%S+") do
-    if cur == "" then
-      cur = word
-    elseif vim.fn.strdisplaywidth(cur .. " " .. word) <= width then
-      cur = cur .. " " .. word
-    else
-      table.insert(out, cur)
-      cur = word
-    end
-  end
-  if cur ~= "" then
-    table.insert(out, cur)
-  end
-  return out
+---Winbar values are statusline format strings, where `%` starts an item.
+local function esc(text)
+  return (text:gsub("%%", "%%%%"))
 end
 
----The virtual lines for an expanded commit: the full subject when diffview cut it
----short, then the body, then an empty guide row before the file rows.
----@return table[]|nil
-local function message_lines(commit, width)
-  local text = {}
-  local body = bodies[commit.hash] or ""
-  if #(commit.subject or "") > SUBJECT_MAX then
-    table.insert(text, commit.subject)
-    if body ~= "" then
-      table.insert(text, "")
-    end
+local function winbar(commit)
+  local sep = " %#CommitDetailsMeta#·%* "
+  local bar = "  %#CommitDetailsHash#" .. commit.hash:sub(1, 8) .. "%*"
+  if commit.author and commit.author ~= "" then
+    bar = bar .. sep .. esc(commit.author)
   end
-  if body ~= "" then
-    vim.list_extend(text, vim.split(body, "\n", { plain = true }))
+  if commit.rel_date and commit.rel_date ~= "" then
+    bar = bar .. sep .. "%#CommitDetailsMeta#" .. esc(commit.rel_date) .. "%*"
   end
-  if #text == 0 then
-    return nil
+  if commit.ref_names then
+    bar = bar .. "  %#CommitDetailsRef#(" .. esc(commit.ref_names) .. ")%*"
   end
+  return bar
+end
 
-  local blank = { { vim.trim(GUIDE), "CommitDetailsGuide" } }
-  local text_width = math.max(width - vim.fn.strdisplaywidth(GUIDE), 20)
-  local lines = {}
-  for _, line in ipairs(text) do
-    if vim.trim(line) == "" then
-      table.insert(lines, blank)
-    else
-      for _, piece in ipairs(wrap(line, text_width)) do
-        table.insert(lines, { { GUIDE, "CommitDetailsGuide" }, { piece, "CommitDetailsBody" } })
-      end
-    end
+---The commit to show: the one under the panel's cursor, so moving over commit rows
+---with j/k previews their messages, else the commit of the file in the diff.
+local function shown_commit(panel)
+  local ok, entry = pcall(panel.get_log_entry_at_cursor, panel)
+  if not (ok and entry) then
+    entry = panel.cur_item and panel.cur_item[1]
   end
-  table.insert(lines, blank)
-  return lines
+  return entry and entry.commit
 end
 
 ---@param panel table FileHistoryPanel
-local function decorate(panel)
-  local buf, win = panel.bufid, panel.winid
-  if not buf or not vim.api.nvim_buf_is_valid(buf) then
+local function update(panel)
+  local s = panels[panel]
+  if not (s and win_ok(s.win)) then
     return
   end
 
-  vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
+  local commit = shown_commit(panel)
+  if not commit or commit.hash == s.hash then
+    return
+  end
+  s.hash = commit.hash
 
   local toplevel = panel.adapter and panel.adapter.ctx and panel.adapter.ctx.toplevel
-  local entries = panel.components and panel.components.log and panel.components.log.entries
-  if not toplevel or not entries or not win or not vim.api.nvim_win_is_valid(win) then
+  if toplevel then
+    fetch_bodies(toplevel, { commit.hash })
+  end
+
+  local lines = { commit.subject or "" }
+  local body = bodies[commit.hash] or ""
+  if body ~= "" then
+    table.insert(lines, "")
+    vim.list_extend(lines, vim.split(body, "\n", { plain = true }))
+  end
+
+  local buf = s.buf
+  vim.bo[buf].modifiable = true
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+
+  vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
+  vim.api.nvim_buf_set_extmark(buf, NS, 0, 0, { end_col = #lines[1], hl_group = "CommitDetailsSubject" })
+
+  vim.wo[s.win].winbar = winbar(commit)
+  -- A new commit starts at its subject, not wherever the last message was scrolled to.
+  vim.api.nvim_win_set_cursor(s.win, { 1, 0 })
+end
+
+local function set_local(win, opts)
+  for name, value in pairs(opts) do
+    vim.api.nvim_set_option_value(name, value, { win = win, scope = "local" })
+  end
+end
+
+---@param total integer columns shared by the panel and the pane
+local function pane_width(total)
+  return math.max(MIN_WIDTH, math.min(MAX_WIDTH, math.floor(total * WIDTH_RATIO)))
+end
+
+---@param panel table FileHistoryPanel
+local function open_pane(panel)
+  local s = pstate(panel)
+  -- Only beside a panel laid out as a row (bottom or top). A sidebar panel has no
+  -- width to give away.
+  if s.hidden or win_ok(s.win) or not win_ok(panel.winid) or panel.state.form ~= "row" then
     return
   end
 
-  local info = vim.fn.getwininfo(win)[1]
-  local width = vim.api.nvim_win_get_width(win) - (info and info.textoff or 0)
-  local separator = { { { string.rep("─", width), "CommitDetailsSeparator" } } }
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].bufhidden = "wipe"
+  vim.bo[buf].modifiable = false
+  vim.bo[buf].filetype = "DiffviewCommitDetails"
 
-  -- Collect the expanded commits first so their bodies come from one git call.
-  local expanded = {}
-  for _, struct in ipairs(entries) do
-    local entry = struct.comp.context
-    if entry and entry.commit and not entry.single_file and not entry.folded then
-      table.insert(expanded, entry.commit.hash)
+  local win = vim.api.nvim_open_win(buf, false, {
+    split = "right",
+    win = panel.winid,
+    width = pane_width(vim.api.nvim_win_get_width(panel.winid)),
+  })
+
+  -- The split copies the panel's window options; keep its colors, drop the rest.
+  set_local(win, {
+    winhl = vim.wo[panel.winid].winhl,
+    wrap = true,
+    linebreak = true,
+    breakindent = true,
+    number = false,
+    relativenumber = false,
+    signcolumn = "no",
+    foldcolumn = "0",
+    statuscolumn = "",
+    cursorline = false,
+    list = false,
+    spell = false,
+    colorcolumn = "",
+    winfixwidth = true,
+    winfixheight = true,
+  })
+
+  vim.keymap.set("n", "i", M.toggle, { buffer = buf, desc = "Hide commit details" })
+
+  s.win, s.buf, s.hash = win, buf, nil
+  update(panel)
+end
+
+---@param panel table FileHistoryPanel
+local function close_pane(panel)
+  local s = panels[panel]
+  if s and win_ok(s.win) then
+    pcall(vim.api.nvim_win_close, s.win, true)
+  end
+  if s then
+    s.win, s.buf, s.hash = nil, nil, nil
+  end
+end
+
+---Fold every commit but the one `item` belongs to when the selection moves into a
+---different commit. Returns that commit's LogEntry, or nil for a single-file
+---history (no folds) or a commit row.
+---@param panel table FileHistoryPanel
+local function accordion(panel, item)
+  -- A LogEntry carries `files`; a FileEntry doesn't.
+  if panel.single_file or not item or item.files then
+    return nil
+  end
+  local entry = panel:find_entry(item)
+  if not entry then
+    return nil
+  end
+
+  local s = pstate(panel)
+  if s.active ~= entry then
+    s.active = entry
+    local changed = entry.folded
+    for _, other in ipairs(panel.entries) do
+      if other ~= entry and not other.folded then
+        other.folded = true
+        changed = true
+      end
+    end
+    entry.folded = false
+    if changed then
+      panel:render()
+      panel:redraw()
     end
   end
-  fetch_bodies(toplevel, expanded)
+  return entry
+end
 
-  local line_count = vim.api.nvim_buf_line_count(buf)
-  local first = true
+---Scroll so `entry`'s commit row is the first line in the panel, even near the end of
+---the list where that leaves empty rows below it: the current commit and its files
+---then sit in the same place on every step.
+---@param panel table FileHistoryPanel
+local function pin(panel, entry)
+  local win = panel.winid
+  local entries = panel.components and panel.components.log and panel.components.log.entries
+  if not win_ok(win) or not entries then
+    return
+  end
+
   for _, struct in ipairs(entries) do
-    local entry = struct.comp.context
-    local row = struct.commit.comp.lstart
-    -- The panel caps how many entries it renders while the log is still streaming in;
-    -- the rest have no rows yet.
-    if entry and entry.commit and row >= 0 and row < line_count then
-      if not first then
-        vim.api.nvim_buf_set_extmark(buf, NS, row, 0, {
-          virt_lines = separator,
-          virt_lines_above = true,
-        })
+    if struct.comp.context == entry then
+      local height = vim.api.nvim_win_get_height(win)
+      local cursor = vim.api.nvim_win_get_cursor(win)[1]
+      local topline = struct.commit.comp.lstart + 1
+      -- A commit with more files than the panel has rows: keep the cursor in view.
+      if cursor >= topline + height then
+        topline = cursor - height + 1
       end
-      first = false
-
-      if not entry.single_file and not entry.folded then
-        local lines = message_lines(entry.commit, width)
-        if lines then
-          vim.api.nvim_buf_set_extmark(buf, NS, row, 0, { virt_lines = lines })
-        end
-      end
+      vim.api.nvim_win_call(win, function()
+        vim.fn.winrestview({ topline = topline })
+      end)
+      return
     end
+  end
+end
+
+local function current_panel()
+  local ok, lib = pcall(require, "diffview.lib")
+  local view = ok and lib.get_current_view()
+  local panel = view and view.panel
+  if panel and panel.get_log_entry_at_cursor then
+    return panel
+  end
+end
+
+---Hide or show the details pane for the current view's panel.
+function M.toggle()
+  local panel = current_panel()
+  if not panel then
+    return
+  end
+  local s = pstate(panel)
+  s.hidden = not s.hidden
+  if s.hidden then
+    close_pane(panel)
+  else
+    open_pane(panel)
   end
 end
 
@@ -203,24 +339,70 @@ function M.setup()
   end
 
   local FileHistoryPanel = mod.FileHistoryPanel
-  local redraw = FileHistoryPanel.redraw
+  -- These resolve to the Panel base class through the class metatable.
+  local open, close, redraw = FileHistoryPanel.open, FileHistoryPanel.close, FileHistoryPanel.redraw
+  local highlight_item = FileHistoryPanel.highlight_item
+
+  FileHistoryPanel.open = function(self, ...)
+    open(self, ...)
+    if win_ok(self.winid) then
+      -- pin() puts the commit row on the first line with the cursor one row below
+      -- it; any scrolloff would scroll it back down.
+      vim.wo[self.winid].scrolloff = 0
+    end
+    pcall(open_pane, self)
+    -- A reopened panel (<leader>b, or diffview rebuilding the layout) starts at the
+    -- top of the list.
+    local s = panels[self]
+    if s and s.active and not self.single_file then
+      pcall(pin, self, s.active)
+    end
+  end
+
+  FileHistoryPanel.close = function(self, ...)
+    pcall(close_pane, self)
+    return close(self, ...)
+  end
 
   FileHistoryPanel.redraw = function(self, ...)
     redraw(self, ...)
-    pcall(decorate, self)
+    pcall(update, self)
   end
 
-  -- The separators and wrapped bodies are sized to the panel's width, which diffview
-  -- doesn't redraw for.
-  vim.api.nvim_create_autocmd("WinResized", {
-    callback = function()
-      for _, win in ipairs(vim.v.event.windows or {}) do
-        local buf = vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win)
-        if buf and vim.bo[buf].filetype == "DiffviewFileHistory" then
-          local view = require("diffview.lib").get_current_view()
-          if view and view.panel and view.panel.bufid == buf then
-            pcall(decorate, view.panel)
+  -- Called with the file <tab>/<s-tab> or a selection moves to, before diffview
+  -- loads its diff.
+  FileHistoryPanel.highlight_item = function(self, item, ...)
+    local ok_fold, entry = pcall(accordion, self, item)
+    highlight_item(self, item, ...)
+    if ok_fold and entry then
+      pcall(pin, self, entry)
+    end
+    pcall(update, self)
+  end
+
+  vim.api.nvim_create_autocmd("FileType", {
+    pattern = "DiffviewFileHistory",
+    callback = function(ev)
+      vim.keymap.set("n", "i", M.toggle, { buffer = ev.buf, desc = "Toggle commit details" })
+      vim.api.nvim_create_autocmd("CursorMoved", {
+        buffer = ev.buf,
+        callback = function()
+          local panel = current_panel()
+          if panel and panel.bufid == ev.buf then
+            pcall(update, panel)
           end
+        end,
+      })
+    end,
+  })
+
+  vim.api.nvim_create_autocmd("VimResized", {
+    callback = function()
+      for panel, s in pairs(panels) do
+        if win_ok(s.win) and win_ok(panel.winid) then
+          -- +1 for the separator column between them.
+          local total = vim.api.nvim_win_get_width(panel.winid) + vim.api.nvim_win_get_width(s.win) + 1
+          vim.api.nvim_win_set_width(s.win, pane_width(total))
         end
       end
     end,
