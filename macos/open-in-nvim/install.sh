@@ -27,14 +27,54 @@ codesign --force --sign - "$app"
 
 [ $# -gt 0 ] && exit 0
 
-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$app"
-grep -v '^#' "$here/extensions" | while read -r ext; do
-  # A line with a dot is a content type (UTI): some types, like Markdown, keep a
-  # handler of their own that wins over the extension's (Xcode claims Markdown).
-  case "$ext" in
-    "") ;;
-    *.*) duti -s "$id" "$ext" all ;;
-    *) duti -s "$id" ".$ext" all ;;
-  esac
-done
-echo "Open in Nvim.app installed and set as the default for $(grep -vc '^#' "$here/extensions") extensions"
+lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+"$lsregister" -f "$app"
+
+# Sets the handler for each argument; prints the ones duti refused.
+set_handlers() {
+  local ext
+  for ext in "$@"; do
+    # A line with a dot is a content type (UTI): some types, like Markdown, keep a
+    # handler of their own that wins over the extension's (Xcode claims Markdown).
+    case "$ext" in
+      *.*) duti -s "$id" "$ext" all >/dev/null 2>&1 || echo "$ext" ;;
+      *) duti -s "$id" ".$ext" all >/dev/null 2>&1 || echo "$ext" ;;
+    esac
+  done
+}
+
+exts=()
+while read -r ext; do [ -n "$ext" ] && exts+=("$ext"); done < <(grep -v '^#' "$here/extensions")
+failed=()
+while read -r ext; do [ -n "$ext" ] && failed+=("$ext"); done < <(set_handlers "${exts[@]}")
+
+# An extension that no installed app declares gets a dynamic UTI (dyn.…), and
+# LaunchServices refuses to set a handler for those (duti error -50). Declare those
+# extensions as plain-text types in the app itself, so they get real UTIs, then retry.
+if [ ${#failed[@]} -gt 0 ]; then
+  $pb -c "Add :UTImportedTypeDeclarations array" "$plist"
+  i=0
+  for ext in "${failed[@]}"; do
+    case "$ext" in *.*) continue ;; esac
+    key=":UTImportedTypeDeclarations:$i"
+    $pb -c "Add $key dict" \
+        -c "Add $key:UTTypeIdentifier string $id.ext.$ext" \
+        -c "Add $key:UTTypeDescription string .$ext file" \
+        -c "Add $key:UTTypeConformsTo array" \
+        -c "Add $key:UTTypeConformsTo:0 string public.plain-text" \
+        -c "Add $key:UTTypeTagSpecification dict" \
+        -c "Add $key:UTTypeTagSpecification:public.filename-extension array" \
+        -c "Add $key:UTTypeTagSpecification:public.filename-extension:0 string $ext" \
+        "$plist"
+    i=$((i + 1))
+  done
+  codesign --force --sign - "$app"
+  "$lsregister" -f "$app"
+  still=()
+  while read -r ext; do [ -n "$ext" ] && still+=("$ext"); done < <(set_handlers "${failed[@]}")
+  [ ${#failed[@]} -gt ${#still[@]} ] && echo "declared types for: ${failed[*]}"
+  failed=("${still[@]+"${still[@]}"}")
+fi
+
+echo "Open in Nvim.app installed and set as the default for $((${#exts[@]} - ${#failed[@]})) of ${#exts[@]} extensions"
+[ ${#failed[@]} -eq 0 ] || echo "warning: could not set a handler for: ${failed[*]}" >&2
