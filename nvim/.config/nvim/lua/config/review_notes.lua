@@ -893,6 +893,7 @@ local function open_thread(note, toplevel, back)
 
   -- What runs once the float has closed; each key sets it, then closes.
   local next_step = back
+  local win_close -- set once the float exists
   local function close_then(fn, desc)
     return {
       function(self)
@@ -929,8 +930,40 @@ local function open_thread(note, toplevel, back)
     keys["<Esc>"] = close_then(nil, "Close")
   end
 
-  local footer = back and " o code · r reply · x %s · q list · <Esc> close "
-    or " o code · r reply · x %s · q close "
+  -- File references in the thread (path:line, GitHub permalinks, file:// links) open
+  -- in a new tab from the local clone; see code_refs.lua. <Tab> steps between them.
+  local code_refs = require("config.code_refs")
+  local refs = {}
+  local function open_ref()
+    local loc = code_refs.at_cursor(toplevel)
+    if not loc then
+      return notify("No file reference on this line")
+    end
+    next_step = function()
+      code_refs.open(loc)
+    end
+    -- Leave the list out of it: the tab is where you're going.
+    win_close()
+  end
+  keys.gf = { open_ref, desc = "Open the file reference in a tab" }
+  keys["<CR>"] = { open_ref, desc = "Open the file reference in a tab" }
+  keys["<Tab>"] = {
+    function()
+      local cur = api.nvim_win_get_cursor(0)
+      for _, r in ipairs(refs) do
+        if r.row + 1 > cur[1] or (r.row + 1 == cur[1] and r.col > cur[2]) then
+          return api.nvim_win_set_cursor(0, { r.row + 1, r.col })
+        end
+      end
+      if refs[1] then
+        api.nvim_win_set_cursor(0, { refs[1].row + 1, refs[1].col })
+      end
+    end,
+    desc = "Next file reference",
+  }
+
+  local footer = back and " o code · r reply · x %s · ⏎ open ref · <Tab> next ref · q list · <Esc> close "
+    or " o code · r reply · x %s · ⏎ open ref · <Tab> next ref · q close "
   local win = Snacks.win({
     title = (" Note #%d "):format(note.id),
     footer = footer:format(resolve_label),
@@ -950,11 +983,15 @@ local function open_thread(note, toplevel, back)
     end,
     keys = keys,
   })
+  function win_close()
+    win:close()
+  end
   for _, mark in ipairs(marks) do
     local opts = vim.deepcopy(mark)
     opts.row, opts.col = nil, nil
     api.nvim_buf_set_extmark(win.buf, NS, mark.row - 1, mark.col, opts)
   end
+  refs = code_refs.mark(win.buf, toplevel)
 end
 
 ---Show the whole thread of the note under the cursor.
