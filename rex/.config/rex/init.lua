@@ -352,8 +352,13 @@ rex.bind(P .. "shift+v", "goto_session", { label = "home", tab = "garden" })  --
 rex.bind(P .. "shift+9", "session.previous")      -- (
 rex.bind(P .. "shift+0", "session.next")          -- )
 rex.bind(P .. "shift+4", "session.rename")        -- $
-rex.bind(P .. "tab", "session.recent")            -- tmux: switch-client -l (bound to Tab)
-rex.bind(P .. "shift+l", "session.recent")        -- tmux default L, same thing
+-- Rex build 2116 (2026-11-24) replaced the scoped "recent" toggles (session.recent,
+-- client.tab.recent.in_session, pane.focus_recent.in_tab) with one history of the panes
+-- you've been in, across tabs and sessions. Back again goes further back, not back to
+-- where you started; forward returns.
+rex.bind(P .. "tab", "client.navigate.back")      -- tmux: switch-client -l (bound to Tab)
+rex.bind(P .. "shift+l", "client.navigate.back")  -- tmux default L, same thing
+rex.bind(P .. "shift+tab", "client.navigate.forward")
 
 -- --- Tabs (tmux windows) -------------------------------------------------------------
 -- tmux numbers windows from 0, Rex tabs from 1: ctrl+a 0 is the first tab, as in tmux
@@ -365,7 +370,7 @@ rex.bind(P .. "p", "client.tab.previous")
 rex.bind(P .. "c", "client.tab.new")
 rex.bind(P .. ",", "client.tab.rename")
 rex.bind(P .. "shift+7", "tab_close_keep_floats") -- & (moves floating panes off first)
-rex.bind(P .. "l", "client.tab.recent.in_session") -- tmux: last-window
+rex.bind(P .. "l", "client.navigate.back")        -- tmux: last-window
 rex.bind("alt+cmd+right", "client.tab.next")      -- from Ghostty
 rex.bind("alt+cmd+left", "client.tab.previous")
 rex.bind("shift+cmd+left", "client.tab.move", { direction = "backward" })  -- from iTerm2
@@ -383,7 +388,7 @@ rex.bind(P .. "ctrl+j", "pane.focus", { direction = "down" })
 rex.bind(P .. "ctrl+k", "pane.focus", { direction = "up" })
 rex.bind(P .. "ctrl+l", "pane.focus", { direction = "right" })
 rex.bind(P .. "o", "pane.focus_next")
-rex.bind(P .. ";", "pane.focus_recent.in_tab")    -- tmux: last-pane
+rex.bind(P .. ";", "client.navigate.back")        -- tmux: last-pane
 rex.bind(P .. "z", "pane.zoom")
 rex.bind(P .. "x", "pane.close")
 rex.bind(P .. "shift+1", "pane.move_to_new_tab")  -- ! (break-pane)
