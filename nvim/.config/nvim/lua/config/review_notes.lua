@@ -883,6 +883,8 @@ end
 ---  o  go to the code (closes the float)
 ---  r  reply; the thread reopens afterwards with your message in it
 ---  x  resolve / reopen
+---  ⏎ / gf  open the file reference under the cursor in a new tab (the thread stays
+---          open in this one)
 ---  q  close, or back to the list when the thread was opened from it (`back`)
 ---@param note ReviewNote
 ---@param toplevel string
@@ -893,7 +895,6 @@ local function open_thread(note, toplevel, back)
 
   -- What runs once the float has closed; each key sets it, then closes.
   local next_step = back
-  local win_close -- set once the float exists
   local function close_then(fn, desc)
     return {
       function(self)
@@ -939,11 +940,9 @@ local function open_thread(note, toplevel, back)
     if not loc then
       return notify("No file reference on this line")
     end
-    next_step = function()
-      code_refs.open(loc)
-    end
-    -- Leave the list out of it: the tab is where you're going.
-    win_close()
+    -- The float stays open: it belongs to this tab, so it's still here when you come
+    -- back (gt / gT) to read on or open the next reference.
+    code_refs.open(loc)
   end
   keys.gf = { open_ref, desc = "Open the file reference in a tab" }
   keys["<CR>"] = { open_ref, desc = "Open the file reference in a tab" }
@@ -983,9 +982,6 @@ local function open_thread(note, toplevel, back)
     end,
     keys = keys,
   })
-  function win_close()
-    win:close()
-  end
   for _, mark in ipairs(marks) do
     local opts = vim.deepcopy(mark)
     opts.row, opts.col = nil, nil
