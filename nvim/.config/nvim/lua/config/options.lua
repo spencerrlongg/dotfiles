@@ -43,6 +43,29 @@ vim.opt.showtabline = 2
 -- when working locally — silently breaking yy without any error.
 vim.opt.clipboard = "unnamedplus"
 
+-- In a Rex pane, yanks also go to the clipboard of the Mac you're typing on. nvim runs
+-- on mbp, so pbcopy alone fills mbp's clipboard even when you're on the Air. Rex hands
+-- the OSC 52 clipboard escape to the Rex app that owns the pane, so each yank runs
+-- pbcopy (mbp) and sends OSC 52 (the Mac you're on). nvim's own OSC 52 writer is used
+-- because programs nvim starts have no terminal to write the escape to, so the
+-- ~/.local/bin/pbcopy wrapper can't do it from here. Paste (p) still reads mbp's
+-- clipboard; Cmd+V pastes the local one.
+if vim.env.REX_SESSION and not vim.env.TMUX then
+  local function copy(reg)
+    local osc52 = require("vim.ui.clipboard.osc52").copy(reg)
+    return function(lines, regtype)
+      vim.fn.system({ "/usr/bin/pbcopy" }, lines)
+      osc52(lines, regtype)
+    end
+  end
+  vim.g.clipboard = {
+    name = "pbcopy + OSC 52 (Rex)",
+    copy = { ["+"] = copy("+"), ["*"] = copy("*") },
+    paste = { ["+"] = { "pbpaste" }, ["*"] = { "pbpaste" } },
+    cache_enabled = 0,
+  }
+end
+
 -- Rounded border on every floating window by default (LSP hover/signature, :checkhealth,
 -- :Lazy, blink.cmp menu, which-key, snacks pickers/notifier) — nvim 0.11+ applies this
 -- to any float that doesn't hardcode its own border shape, no per-plugin config needed.

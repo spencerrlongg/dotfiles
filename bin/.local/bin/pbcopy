@@ -1,0 +1,33 @@
+#!/bin/sh
+# pbcopy that also copies to the Mac you're typing on.
+#
+# Programs in a Rex pane on mbp run on mbp, so /usr/bin/pbcopy fills mbp's clipboard
+# even when you're typing on the Air. Rex passes the OSC 52 clipboard escape on to the
+# Rex app that owns the pane (the Mac you're typing on), which puts the text on that
+# Mac's clipboard. So inside Rex this runs the real pbcopy and also writes OSC 52 to
+# the pane's terminal.
+#
+# It's found through PATH (~/.local/bin comes before /usr/bin), so it covers everything
+# that copies by running `pbcopy`: nvim's clipboard (yy with clipboard=unnamedplus),
+# devnull, lazygit, and `... | pbcopy` in the shell. Outside Rex, or inside tmux (which
+# would need its own passthrough), it's plain pbcopy.
+REAL=/usr/bin/pbcopy
+
+if [ -z "$REX_SESSION" ] || [ -n "$TMUX" ]; then
+  exec "$REAL" "$@"
+fi
+
+tmp=$(mktemp "${TMPDIR:-/tmp}/pbcopy.XXXXXX") || exec "$REAL" "$@"
+trap 'rm -f "$tmp"' EXIT
+cat >"$tmp"
+"$REAL" "$@" <"$tmp"
+status=$?
+
+# Up to 1 MB of text; larger copies only reach this Mac's clipboard.
+if [ "$(wc -c <"$tmp")" -le 1048576 ]; then
+  # One printf, so the escape goes out in one piece and doesn't get mixed into the
+  # screen output of a full-screen program that's running the copy.
+  seq=$(printf '\033]52;c;%s\a' "$(base64 <"$tmp" | tr -d '\n')")
+  { printf '%s' "$seq" >/dev/tty; } 2>/dev/null
+fi
+exit $status
