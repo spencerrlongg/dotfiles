@@ -15,14 +15,22 @@ defaults -currentHost write -globalDomain NSStatusItemSelectionPadding -int 8
 # Control Center battery: 8 = don't show in the menu bar.
 defaults -currentHost write com.apple.controlcenter Battery -int 8
 
-# Symbolic hotkeys, by id: 32 Mission Control (ctrl+up), 33 App windows (ctrl+down),
-# 34 Show Desktop, 79 / 81 Move a Space left / right (ctrl+left / ctrl+right).
-hotkey_off() { defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add "$1" "$2"; }
-hotkey_off 32 '{ enabled = 0; }'
-hotkey_off 33 '{ enabled = 0; }'
-hotkey_off 34 '{ enabled = 0; }'
-hotkey_off 79 '{ enabled = 0; value = { parameters = (65535, 123, 8650752); type = standard; }; }'
-hotkey_off 81 '{ enabled = 0; value = { parameters = (65535, 124, 8650752); type = standard; }; }'
+# Symbolic hotkeys, by id: 32 / 34 Mission Control (ctrl+up), 33 / 35 App windows
+# (ctrl+down), 79 / 81 Move a Space left / right (ctrl+left / ctrl+right), 80 / 82 the
+# same with shift. All off.
+# XML, not the `{ enabled = 0; }` form: that one stores "0" as a string, which macOS
+# reads as on (it left Ctrl+up/down opening Mission Control on the Air).
+hotkey_off() {
+  local value=""
+  [ -n "${2:-}" ] && value="<key>value</key><dict><key>parameters</key><array><integer>65535</integer><integer>$2</integer><integer>$3</integer></array><key>type</key><string>standard</string></dict>"
+  defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add "$1" \
+    "<dict><key>enabled</key><false/>$value</dict>"
+}
+for id in 32 33 34 35; do hotkey_off "$id"; done
+hotkey_off 79 123 8650752 # ctrl+left
+hotkey_off 80 123 8781824 # ctrl+shift+left
+hotkey_off 81 124 8650752 # ctrl+right
+hotkey_off 82 124 8781824 # ctrl+shift+right
 # Makes the keyboard shortcut changes take effect without logging out.
 /System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings -u 2>/dev/null || true
 
