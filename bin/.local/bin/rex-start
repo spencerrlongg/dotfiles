@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # rex-start — restore the dev session layout in Rex (the Rex version of tmux-start)
-# Sessions, in picker order: home, snipe-mobile, snipe-it
+# Sessions, in picker order: home, snipe-mobile, snipe-it, spencerlong.com
 # (the showcase is window 3, "garden", of home, like tmux-start + tmux-showcase)
 # Created in that order. A session whose label already exists is skipped, and so is
 # home's garden window, so the script is safe to run again after closing one of them.
@@ -10,7 +10,7 @@
 # servers_toggle in ~/.config/rex/init.lua). A session that has no server panes gets
 # them, even when the session itself already existed.
 #
-# rex-start --fresh (or -f) kills home, snipe-mobile and snipe-it first and builds
+# rex-start --fresh (or -f) kills home, snipe-mobile, snipe-it and spencerlong.com first and builds
 # them again, for when their programs are gone (a Rex server update or restart
 # leaves the layouts but not the processes). Other sessions are left alone. Run from
 # a pane in one of those sessions, it finishes in the background, because killing
@@ -37,7 +37,7 @@ command -v jq  >/dev/null || { echo "jq not found on PATH" >&2; exit 1; }
 NVIM_PROJECT="$HOME/.local/bin/nvim-project"
 
 if $fresh; then
-  kill_ids=$(rex ls --json | jq -r '.sessions[] | select(.label | IN("home", "snipe-mobile", "snipe-it")) | .session_id')
+  kill_ids=$(rex ls --json | jq -r '.sessions[] | select(.label | IN("home", "snipe-mobile", "snipe-it", "spencerlong.com")) | .session_id')
   # Started from a pane that the kill would close: hand off to a copy of this script
   # in its own process session (perl's setsid; macOS has no setsid command), so
   # closing the pane doesn't take the copy with it. The copy drops REX_SESSION and
@@ -180,10 +180,18 @@ if ! has_session snipe-it; then
 fi
 add_servers snipe-it "ngrok|$HOME/dev/snipe-it|ngrok start snipe-it"
 
+# --- spencerlong.com (Herd serves spencerlong.com.test, so no dev server pane) ---
+if ! has_session spencerlong.com; then
+  dir="$HOME/dev/spencerlong.com"
+  read -r s b < <(new_session spencerlong.com "$dir" claude)
+  type_cmd "$s" "$b" 'claude'
+  rex window new -s "$s" nvim -c "$dir" --focus=false -- "$NVIM_PROJECT" >/dev/null
+fi
+
 # Session order: Rex lists sessions (sidebar, rex ls, number keys) in an order it
 # keeps, and new ones go last. Sessions that already existed keep their old spot, so
-# put these three first, in this order, on every run. Any other sessions follow them.
-order=(home snipe-mobile snipe-it)
+# put these four first, in this order, on every run. Any other sessions follow them.
+order=(home snipe-mobile snipe-it spencerlong.com)
 i=1
 for label in "${order[@]}"; do
   id=$(rex ls --json | jq -r --arg l "$label" '.sessions[] | select(.label == $l) | .session_id' | head -n1)

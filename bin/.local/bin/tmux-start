@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # tmux-start — restore dev session layout
-# Sessions, in picker order: home, snipe-mobile, servers, snipe-it
+# Sessions, in picker order: home, snipe-mobile, servers, snipe-it, spencerlong
+# (spencerlong.com's session; tmux doesn't allow . in session names)
 # (the showcase is window 2 of home, built by tmux-showcase)
 # Created in that order so tmux's session ids ($0, $1, ...) follow it too.
 # ngrok and Expo are skipped when they're already running (see start_server).
@@ -50,6 +51,11 @@ start_server servers:1 Expo 'EXPO_UNSTABLE_MCP_SERVER=1 npx expo start' lsof -nP
 tmux new-session -d -s snipe-it   -c /Users/spencer/dev/snipe-it        -n claude
 tmux send-keys  -t snipe-it:0     'claude' Enter
 tmux new-window    -t snipe-it    -c /Users/spencer/dev/snipe-it         -n nvim "$NVIM_PROJECT"
+
+# --- spencerlong.com ---
+tmux new-session -d -s spencerlong -c /Users/spencer/dev/spencerlong.com -n claude
+tmux send-keys  -t spencerlong:0  'claude' Enter
+tmux new-window    -t spencerlong -c /Users/spencer/dev/spencerlong.com  -n nvim "$NVIM_PROJECT"
 
 # Open on the showcase
 tmux attach -t home:garden
